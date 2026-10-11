@@ -1,0 +1,149 @@
+{
+  "name": "codesentinel",
+  "displayName": "CodeSentinel Security Scanner",
+  "description": "Multi-language Static Application Security Testing (SAST) & Agentic Security Auditor with MCP & OpenCode integration",
+  "version": "0.1.0",
+  "publisher": "codesentinel",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Security",
+    "Linters",
+    "AI",
+    "Programming Languages"
+  ],
+  "main": "./dist/extension.js",
+  "bin": {
+    "codesentinel-mcp": "./dist/mcp-server.js"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "codesentinel.launchOpenCodeTerminal",
+        "title": "CodeSentinel: Launch OpenCode in Active Workspace",
+        "category": "CodeSentinel"
+      },
+      {
+        "command": "codesentinel.openEmbeddedWeb",
+        "title": "CodeSentinel: Focus Security Agent in Extension Sidebar",
+        "category": "CodeSentinel"
+      },
+      {
+        "command": "codeSentinel.openOpenCode",
+        "title": "Code Sentinel: Open OpenCode",
+        "category": "CodeSentinel"
+      },
+      {
+        "command": "codesentinel.launchOpenCodeWeb",
+        "title": "CodeSentinel: Launch OpenCode Web UI (Browser)",
+        "category": "CodeSentinel"
+      },
+      {
+        "command": "codesentinel.startOpenCodeServer",
+        "title": "CodeSentinel: Start OpenCode Headless Server",
+        "category": "CodeSentinel"
+      },
+      {
+        "command": "codesentinel.syncOpenCodeConfig",
+        "title": "CodeSentinel: Sync OpenCode MCP Configuration",
+        "category": "CodeSentinel"
+      },
+      {
+        "command": "codesentinel.toggleBackendMode",
+        "title": "CodeSentinel: Switch Backend Mode (Docker / Cloud)",
+        "category": "CodeSentinel"
+      },
+      {
+        "command": "codesentinel.buildContainer",
+        "title": "CodeSentinel: Deploy / Build Unified Container Image",
+        "category": "CodeSentinel"
+      },
+      {
+        "command": "codesentinel.openCodeGraph",
+        "title": "CodeSentinel: Open 360° Interactive Code Graph",
+        "category": "CodeSentinel"
+      },
+      {
+        "command": "codesentinel.indexAtlas",
+        "title": "CodeSentinel: Index Codebase with Atlas Code Graph",
+        "category": "CodeSentinel"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codesentinel-explorer",
+          "title": "CodeSentinel",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "codesentinel-explorer": [
+        {
+          "type": "webview",
+          "id": "codesentinel.controlCenter",
+          "name": "Security & Agent Control Center"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "CodeSentinel",
+      "properties": {
+        "codesentinel.backendMode": {
+          "type": "string",
+          "enum": [
+            "local-docker",
+            "cloud"
+          ],
+          "default": "local-docker",
+          "description": "Backend execution mode: local hermetic Docker container or remote cloud endpoint."
+        },
+        "codesentinel.dockerImage": {
+          "type": "string",
+          "default": "codesentinel/core:latest",
+          "description": "Docker container image used for hermetic scanner operations."
+        },
+        "codesentinel.cloudEndpoint": {
+          "type": "string",
+          "default": "https://api.codesentinel.io/v1",
+          "description": "Remote cloud endpoint URL when running in cloud mode."
+        },
+        "codesentinel.opencodePath": {
+          "type": "string",
+          "default": "opencode",
+          "description": "Executable path for the OpenCode CLI."
+        },
+        "codesentinel.autoLaunchOpenCode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically open OpenCode session when a workspace repository is loaded."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "build": "node esbuild.config.mjs --production",
+    "build:dev": "node esbuild.config.mjs",
+    "test": "node dist/test/runner.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.18.0",
+    "js-yaml": "^4.1.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.90.0",
+    "esbuild": "^0.23.0",
+    "typescript": "^5.5.4"
+  }
+}

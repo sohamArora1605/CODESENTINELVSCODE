@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Compilation Artifacts and Bundles
+dist/
+out/
+*.tsbuildinfo
+.atlas/
+
+# Extension Packaging and Testing
+.vscode-test/
+*.vsix
+
+# Environment & Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+.env
+.env.*
+!.env.example
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+desktop.ini

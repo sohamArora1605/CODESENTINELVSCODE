@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  # CodeSentinel Core Hermetic Security Engine & MCP Server
+  codesentinel-core:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: codesentinel/core:latest
+    container_name: codesentinel-core
+    volumes:
+      - .:/workspace:ro
+    environment:
+      - NODE_ENV=production
+      - CODESENTINEL_CONTAINER=true
+    stdin_open: true
+    tty: true
+
+  # CodeSentinel Static Analyzers (Semgrep & AST analysis service)
+
