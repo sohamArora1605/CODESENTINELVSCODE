@@ -67,5 +67,11 @@ export async function testMcpServer(): Promise<void> {
   const statusTool = standaloneServer.getRegisteredTools().find(t => t.name === "codesentinel_workspace_status");
   assert.ok(statusTool, "codesentinel_workspace_status tool must be registered");
 
-  console.log("  ✔ MCP Server tool registration, lifecycle, and context integration passed!");
+  // Test 7: Verify codesentinel_cloud_security_audit tool registration
+  const cloudAuditTool = standaloneServer.getRegisteredTools().find(t => t.name === "codesentinel_cloud_security_audit");
+  assert.ok(cloudAuditTool, "codesentinel_cloud_security_audit tool must be registered");
+  const cloudAuditAlias = standaloneServer.getRegisteredTools().find(t => t.name === "cloud_security_audit");
+  assert.ok(cloudAuditAlias, "cloud_security_audit alias tool must be registered");
+
+  console.log("  ✔ MCP Server tool registration, lifecycle, and cloud security audit tool passed!");
 }

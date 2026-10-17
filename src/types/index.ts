@@ -1,4 +1,4 @@
-export type BackendMode = "local-docker" | "cloud";
+export type BackendMode = "local" | "cloud" | "local-docker";
 
 export interface WorkspaceContext {
   rootPath: string;

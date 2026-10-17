@@ -3,9 +3,11 @@ import * as path from "path";
 import * as fs from "fs";
 import { exec, spawn, ChildProcess } from "child_process";
 import * as net from "net";
+import * as os from "os";
 import { promisify } from "util";
 import { OpenCodeMcpConfig } from "../types";
 import { DockerClient } from "../docker/dockerClient";
+import { DependencyManager } from "../services/dependencyManager";
 
 const execAsync = promisify(exec);
 
@@ -32,10 +34,31 @@ export class OpenCodeLauncher {
   public getOpencodeCommand(): string {
     try {
       const config = vscode.workspace.getConfiguration("codesentinel");
-      return config.get<string>("opencodePath", "opencode").trim() || "opencode";
-    } catch {
-      return "opencode";
+      const custom = config.get<string>("opencodePath", "").trim();
+      if (custom && custom !== "opencode" && fs.existsSync(custom)) {
+        return custom;
+      }
+    } catch {}
+
+    const binDir = DependencyManager.getInstance().getBinDir();
+    const isWin = process.platform === "win32";
+    const binExe = path.join(binDir, isWin ? "opencode.exe" : "opencode");
+    if (fs.existsSync(binExe)) {
+      return binExe;
     }
+
+    const storagePath = DependencyManager.getInstance().getStoragePath();
+    const nodeBin = path.join(
+      storagePath,
+      "node_modules",
+      ".bin",
+      isWin ? "opencode.cmd" : "opencode"
+    );
+    if (fs.existsSync(nodeBin)) {
+      return nodeBin;
+    }
+
+    return "opencode";
   }
 
   public async checkOpenCodeInstalled(customCommand?: string): Promise<{ installed: boolean; version?: string; error?: string }> {
@@ -48,11 +71,94 @@ export class OpenCodeLauncher {
     }
   }
 
+  /**
+   * Automatically provisions bundled CodeSentinel skills (such as cloud-security-audit)
+   * into the workspace's `.opencode/skills/` directory and user's global `~/.opencode/skills/`.
+   * This guarantees that OpenCode immediately recognizes and loads the skills
+   * whenever a user installs or runs CodeSentinel.
+   */
+  public async provisionSkills(
+    workspaceRoot: string,
+    extensionPath?: string
+  ): Promise<{ workspaceSkillPath: string; globalSkillPath?: string }> {
+    const candidateDirs = [
+      extensionPath ? path.join(extensionPath, "resources", "skills") : null,
+      path.join(__dirname, "..", "resources", "skills"),
+      path.join(__dirname, "resources", "skills"),
+      path.resolve(process.cwd(), "resources", "skills"),
+    ].filter((p): p is string => Boolean(p && fs.existsSync(p)));
+
+    const targetWorkspaceSkillsDir = path.join(workspaceRoot, ".opencode", "skills");
+    const homedir = os.homedir();
+    const targetGlobalSkillsDir = homedir ? path.join(homedir, ".opencode", "skills") : null;
+
+    if (candidateDirs.length === 0) {
+      return { workspaceSkillPath: targetWorkspaceSkillsDir };
+    }
+
+    const sourceSkillsDir = candidateDirs[0];
+
+    const copyDirRecursive = (src: string, dest: string) => {
+      if (!fs.existsSync(dest)) {
+        fs.mkdirSync(dest, { recursive: true });
+      }
+      const entries = fs.readdirSync(src, { withFileTypes: true });
+      for (const entry of entries) {
+        const srcPath = path.join(src, entry.name);
+        const destPath = path.join(dest, entry.name);
+        if (entry.isDirectory()) {
+          copyDirRecursive(srcPath, destPath);
+        } else if (entry.isFile()) {
+          let shouldCopy = true;
+          if (fs.existsSync(destPath)) {
+            try {
+              const srcBuf = fs.readFileSync(srcPath);
+              const destBuf = fs.readFileSync(destPath);
+              if (srcBuf.equals(destBuf)) {
+                shouldCopy = false;
+              }
+            } catch {}
+          }
+          if (shouldCopy) {
+            fs.copyFileSync(srcPath, destPath);
+          }
+        }
+      }
+    };
+
+    // 1. Copy to workspace .opencode/skills/
+    try {
+      copyDirRecursive(sourceSkillsDir, targetWorkspaceSkillsDir);
+    } catch (e: any) {
+      console.warn(`CodeSentinel: Failed to copy skills to workspace: ${e.message}`);
+    }
+
+    // 2. Also copy to global user ~/.opencode/skills/
+    if (targetGlobalSkillsDir) {
+      try {
+        copyDirRecursive(sourceSkillsDir, targetGlobalSkillsDir);
+      } catch (e: any) {
+        console.warn(`CodeSentinel: Failed to copy skills to global ~/.opencode: ${e.message}`);
+      }
+    }
+
+    return {
+      workspaceSkillPath: targetWorkspaceSkillsDir,
+      globalSkillPath: targetGlobalSkillsDir || undefined,
+    };
+  }
+
   public async syncWorkspaceConfig(
     workspaceRoot: string,
     mcpServerScriptPath: string,
-    options?: { useDocker?: boolean; imageName?: string }
+    options?: { useDocker?: boolean; imageName?: string; extensionPath?: string }
   ): Promise<string> {
+    // Auto-provision bundled skills into the workspace and user global config
+    const extensionRoot = options?.extensionPath || path.resolve(path.dirname(mcpServerScriptPath), "..");
+    await this.provisionSkills(workspaceRoot, extensionRoot).catch((err) => {
+      console.warn("Auto-provisioning skills during sync skipped:", err?.message);
+    });
+
     const configPath = path.join(workspaceRoot, "opencode.json");
     let currentConfig: Record<string, any> = {
       $schema: "https://opencode.ai/config.json",
@@ -74,9 +180,12 @@ export class OpenCodeLauncher {
     // Normalize path with forward slashes for cross-platform Docker mount compatibility
     const normalizedMount = workspaceRoot.replace(/\\/g, "/");
 
-    // Configure codesentinel local MCP server entry: containerized or host
-    if (options?.useDocker) {
-      const imageName = options.imageName || "codesentinel/core:latest";
+    // Configure codesentinel local MCP server entry: host Node runtime by default
+    // or Docker container when useDocker is explicitly requested.
+    const useDocker = options?.useDocker ?? false;
+    const imageName = options?.imageName || "codesentinel/core:latest";
+
+    if (useDocker) {
       currentConfig.mcp["codesentinel"] = {
         type: "local",
         command: [
@@ -85,17 +194,20 @@ export class OpenCodeLauncher {
           "-i",
           "--rm",
           "-v",
-          `${normalizedMount}:/workspace:ro`,
-          "-e",
-          "CODESENTINEL_WORKSPACE=/workspace",
+          `${normalizedMount}:/workspace`,
           imageName,
+          "node",
+          "/app/dist/mcp-server.js",
         ],
         enabled: true,
+        environment: {
+          CODESENTINEL_WORKSPACE: "/workspace",
+        },
       };
     } else {
       currentConfig.mcp["codesentinel"] = {
         type: "local",
-        command: ["node", mcpServerScriptPath],
+        command: ["node", mcpServerScriptPath.replace(/\\/g, "/")],
         enabled: true,
         environment: {
           CODESENTINEL_WORKSPACE: workspaceRoot,
@@ -103,25 +215,24 @@ export class OpenCodeLauncher {
       };
     }
 
-    // Configure Atlas Semantic Code Graph MCP Server in Unified codesentinel/core container
-    const coreImage = options?.imageName || "codesentinel/core:latest";
+    // Configure Atlas Semantic Code Graph MCP Server via host runtime bridge.
+    // Zero Docker containers required: directly interacts with host .atlas/atlas.db.
+    const bridgeScriptPath = path.join(
+      path.dirname(mcpServerScriptPath),
+      "atlas-bridge.js"
+    ).replace(/\\/g, "/");
     currentConfig.mcp["atlas"] = {
       type: "local",
       command: [
-        "docker",
-        "run",
-        "-i",
-        "--rm",
-        "--entrypoint",
-        "atlas",
-        "-v",
-        `${normalizedMount}:/workspace`,
-        "-w",
-        "/workspace",
-        coreImage,
-        "mcp",
+        "node",
+        bridgeScriptPath,
+        "local",
+        normalizedMount,
       ],
       enabled: true,
+      environment: {
+        CODESENTINEL_WORKSPACE: workspaceRoot,
+      },
     };
 
     fs.writeFileSync(configPath, JSON.stringify(currentConfig, null, 2), "utf-8");
@@ -246,10 +357,47 @@ export class OpenCodeLauncher {
 
   public async indexWithAtlas(workspaceRoot: string): Promise<{ success: boolean; output: string }> {
     try {
+      const dbPath = path.join(workspaceRoot, ".atlas", "atlas.db");
+
+      // Auto-heal: verify SQLite header and delete corrupt / non-database file if damaged
+      if (fs.existsSync(dbPath)) {
+        try {
+          const stats = fs.statSync(dbPath);
+          if (stats.size < 100) {
+            fs.unlinkSync(dbPath);
+          } else {
+            const fd = fs.openSync(dbPath, "r");
+            const buf = Buffer.alloc(16);
+            fs.readSync(fd, buf, 0, 16, 0);
+            fs.closeSync(fd);
+            if (!buf.toString("utf8").startsWith("SQLite format 3")) {
+              fs.unlinkSync(dbPath);
+            }
+          }
+        } catch {
+          try { fs.unlinkSync(dbPath); } catch {}
+        }
+      }
+
       const excludeArgs = this.buildAtlasExcludeArgs(workspaceRoot);
-      const atlasCmd = `docker run --rm --entrypoint atlas -v "${workspaceRoot}:/workspace" -w /workspace codesentinel/core:latest index ${excludeArgs}`;
-      const { stdout, stderr } = await execAsync(atlasCmd, { timeout: 180000 });
-      return { success: true, output: stdout || stderr };
+
+      // Prioritize host-native Atlas binary from self-contained extension storage
+      let atlasCmd = await DependencyManager.getInstance().getAtlasCommand();
+      if (!fs.existsSync(atlasCmd) && atlasCmd !== "atlas") {
+        try {
+          atlasCmd = await DependencyManager.getInstance().installAtlas(
+            DependencyManager.getInstance().getStoragePath()
+          );
+        } catch {}
+      }
+
+      const env = DependencyManager.getInstance().getEnvWithBinPath();
+      const { stdout: hostOut, stderr: hostErr } = await execAsync(`"${atlasCmd}" index ${excludeArgs}`, {
+        cwd: workspaceRoot,
+        timeout: 180000,
+        env,
+      });
+      return { success: true, output: hostOut || hostErr };
     } catch (err: any) {
       return { success: false, output: err.message };
     }
@@ -266,6 +414,9 @@ export class OpenCodeLauncher {
   }
 
   public launchTerminal(workspaceRoot: string, customPrompt?: string): vscode.Terminal {
+    // Ensure bundled skills (e.g. cloud-security-audit) are provisioned before launch
+    this.provisionSkills(workspaceRoot).catch(() => {});
+
     const repoName = path.basename(workspaceRoot);
     const terminalName = `OpenCode [${repoName}]`;
 
@@ -284,9 +435,14 @@ export class OpenCodeLauncher {
       return existing;
     }
 
+    const env = DependencyManager.getInstance().getEnvWithBinPath();
     const terminal = vscode.window.createTerminal({
       name: terminalName,
       cwd: workspaceRoot,
+      env: {
+        PATH: env.PATH,
+        Path: env.Path,
+      },
     });
 
     terminal.show();
@@ -325,10 +481,12 @@ export class OpenCodeLauncher {
 
     this.serverPort = targetPort;
     const opencodeCmd = this.getOpencodeCommand();
+    const env = DependencyManager.getInstance().getEnvWithBinPath();
     const proc = spawn(opencodeCmd, ["serve", "--port", targetPort.toString(), "--hostname", targetHost], {
       cwd: workspaceRoot,
       shell: true,
       stdio: "pipe",
+      env,
     });
 
     this.serverProcess = proc;
@@ -431,6 +589,9 @@ export class OpenCodeLauncher {
       return { url: projectUrl, port: existingPort };
     }
 
+    // Ensure bundled skills (e.g. cloud-security-audit) are provisioned before starting server
+    this.provisionSkills(workspaceRoot).catch(() => {});
+
     const config = vscode.workspace.getConfiguration("codesentinel");
     const preferredPort = port ?? config.get<number>("opencodeWebPort", 5123);
     const targetPort = await this.findFreePort(preferredPort);
@@ -460,10 +621,9 @@ export class OpenCodeLauncher {
           cwd: workspaceRoot,
           shell: true,
           stdio: "pipe",
-          env: {
-            ...process.env,
+          env: DependencyManager.getInstance().getEnvWithBinPath({
             BROWSER: "none",
-          },
+          }),
         }
       );
 
@@ -536,13 +696,6 @@ export class OpenCodeLauncher {
 
   public async stopWebProcess(): Promise<boolean> {
     let stopped = false;
-    if (this.dockerContainerName) {
-      try {
-        await execAsync(`docker rm -f ${this.dockerContainerName}`);
-      } catch {}
-      this.dockerContainerName = null;
-      stopped = true;
-    }
     if (this.webProcess && !this.webProcess.killed) {
       const pid = this.webProcess.pid;
       if (process.platform === "win32" && pid) {

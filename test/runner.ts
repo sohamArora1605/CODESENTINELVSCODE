@@ -3,6 +3,7 @@ import { testOpenCodeLauncher } from "./opencodeLauncher.test";
 import { testMcpServer } from "./mcpServer.test";
 import { testDockerClient } from "./dockerClient.test";
 import { testGraphService } from "./graphService.test";
+import { testVulnerabilityScanner } from "./vulnerabilityScanner.test";
 
 async function runAllTests() {
   console.log("==========================================");
@@ -17,6 +18,7 @@ async function runAllTests() {
     { name: "CodeSentinelMcpServer", fn: testMcpServer },
     { name: "DockerClient", fn: testDockerClient },
     { name: "GraphService", fn: testGraphService },
+    { name: "VulnerabilityScanner", fn: testVulnerabilityScanner },
   ];
 
   for (const suite of suites) {

@@ -3,6 +3,7 @@ import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
 import { OpenCodeLauncher } from "../src/opencode/opencodeLauncher";
+import { DependencyManager } from "../src/services/dependencyManager";
 
 export async function testOpenCodeLauncher(): Promise<void> {
   console.log("▶ Running OpenCodeLauncher Tests...");
@@ -34,15 +35,18 @@ export async function testOpenCodeLauncher(): Promise<void> {
     assert.ok(parsed.mcp, "opencode.json must have 'mcp' object");
     assert.ok(parsed.mcp.codesentinel, "opencode.json must register 'codesentinel'");
     assert.strictEqual(parsed.mcp.codesentinel.type, "local", "Type must be local");
-    assert.deepStrictEqual(parsed.mcp.codesentinel.command, ["node", fakeMcpScript]);
+    assert.deepStrictEqual(parsed.mcp.codesentinel.command, ["node", fakeMcpScript.replace(/\\/g, "/")]);
     assert.strictEqual(parsed.mcp.codesentinel.enabled, true);
     assert.strictEqual(parsed.mcp.codesentinel.environment.CODESENTINEL_WORKSPACE, tmpDir);
 
     // Verify Atlas MCP registration
     assert.ok(parsed.mcp.atlas, "opencode.json must register 'atlas'");
     assert.strictEqual(parsed.mcp.atlas.type, "local");
-    assert.ok(parsed.mcp.atlas.command.includes("codesentinel/core:latest"));
-    assert.ok(parsed.mcp.atlas.command.includes("--entrypoint"));
+    assert.ok(parsed.mcp.atlas.command[0] === "node" || parsed.mcp.atlas.command.includes("codesentinel/core:latest"));
+    assert.ok(
+      parsed.mcp.atlas.command.some((c: string) => c.includes("atlas-bridge.js")),
+      "Atlas command should use atlas-bridge.js"
+    );
     assert.strictEqual(parsed.mcp.atlas.enabled, true);
 
     // Test 5: syncWorkspaceConfig preserves existing third-party mcp servers
@@ -74,6 +78,17 @@ export async function testOpenCodeLauncher(): Promise<void> {
     const excludeArgs = launcher.buildAtlasExcludeArgs(tmpDir);
     assert.ok(excludeArgs.includes("--exclude \"**/node_modules/**\""), "Should format exclude args");
     assert.ok(excludeArgs.includes("--exclude \"**/*.mp3\""), "Should format media exclude args");
+    // Test 5d: Verify auto-provisioning of cloud-security-audit skill
+    const skillPath = path.join(tmpDir, ".opencode", "skills", "cloud-security-audit");
+    assert.ok(fs.existsSync(skillPath), ".opencode/skills/cloud-security-audit directory must be auto-provisioned");
+    assert.ok(fs.existsSync(path.join(skillPath, "SKILL.md")), "SKILL.md must be auto-provisioned");
+    assert.ok(fs.existsSync(path.join(skillPath, "RECONNAISSANCE.md")), "RECONNAISSANCE.md must be auto-provisioned");
+    assert.ok(fs.existsSync(path.join(skillPath, "HUNTING.md")), "HUNTING.md must be auto-provisioned");
+    assert.ok(fs.existsSync(path.join(skillPath, "VALIDATION-AND-REPORTING.md")), "VALIDATION-AND-REPORTING.md must be auto-provisioned");
+    assert.ok(fs.existsSync(path.join(skillPath, "report-schema.json")), "report-schema.json must be auto-provisioned");
+    const skillContent = fs.readFileSync(path.join(skillPath, "SKILL.md"), "utf-8");
+    assert.ok(skillContent.includes("name: cloud-security-audit"), "Skill metadata must match");
+    console.log("  ✔ Cloud Security Audit skill auto-provisioning verified in workspace");
     console.log("  ✔ Universal language-agnostic and gitignore exclusion engine passed");
     console.log("  ✔ opencode.json synthesis and non-destructive sync (host & docker) passed");
   } finally {
@@ -94,5 +109,23 @@ export async function testOpenCodeLauncher(): Promise<void> {
   assert.strictEqual(sessionUrl, "http://127.0.0.1:5123/RDovQ09ERVNFTlRJTkVMVlNDT0RF/session");
   console.log("  ✔ Active workspace directory encoding and session routing verified");
 
-  console.log("  ✔ All OpenCodeLauncher tests passed!");
+  // Test 8: DependencyManager asset naming & auto-install test
+  console.log("▶ Running DependencyManager Tests...");
+  const depMgr = DependencyManager.getInstance();
+  const asset = depMgr.getAtlasAssetName();
+  assert.ok(asset, "Atlas asset name must be resolved for current OS");
+  console.log(`  - Host Atlas release asset: ${asset}`);
+  const depStatus = await depMgr.checkDependencies(tmpDir);
+  console.log(`  - Host Dependency Status: OpenCode=${depStatus.opencodeInstalled}, Atlas=${depStatus.atlasInstalled}`);
+
+  console.log("  - Downloading & extracting Atlas standalone binary into temp storage...");
+  const installedBin = await depMgr.installAtlas(tmpDir);
+  assert.ok(fs.existsSync(installedBin), "Atlas binary must exist after installation");
+  console.log(`  ✔ Successfully downloaded and installed Atlas: ${installedBin}`);
+
+  const postStatus = await depMgr.checkDependencies(tmpDir);
+  assert.strictEqual(postStatus.atlasInstalled, true, "Atlas must be detected as installed");
+  console.log(`  ✔ Atlas verified: v${postStatus.atlasVersion}`);
+
+  console.log("  ✔ All OpenCodeLauncher & DependencyManager tests passed!");
 }

@@ -125,39 +125,49 @@ export class WorkspaceManager {
       ".php": "php",
       ".rb": "ruby",
       ".cs": "csharp",
+      ".kt": "kotlin",
+      ".swift": "swift",
+      ".scala": "scala",
     };
+
+    const ignoredDirs = new Set([
+      "node_modules",
+      ".git",
+      ".atlas",
+      "target",
+      "build",
+      ".gradle",
+      "dist",
+      "out",
+      "bin",
+      "obj",
+      "vendor",
+      ".venv",
+      "venv",
+      "env",
+      "__pycache__",
+    ]);
 
     const foundLanguages = new Set<string>();
 
-    try {
-      const entries = fs.readdirSync(rootPath, { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.isFile()) {
-          const ext = path.extname(entry.name).toLowerCase();
-          if (languageMap[ext]) {
-            foundLanguages.add(languageMap[ext]);
-          }
-        } else if (entry.isDirectory() && !entry.name.startsWith(".") && entry.name !== "node_modules") {
-          // Shallow check subfolder
-          try {
-            const subEntries = fs.readdirSync(path.join(rootPath, entry.name), { withFileTypes: true });
-            for (const sub of subEntries) {
-              if (sub.isFile()) {
-                const ext = path.extname(sub.name).toLowerCase();
-                if (languageMap[ext]) {
-                  foundLanguages.add(languageMap[ext]);
-                }
-              }
+    const scanDir = (dir: string, depth: number) => {
+      if (depth > 4) return;
+      try {
+        const entries = fs.readdirSync(dir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (entry.isFile()) {
+            const ext = path.extname(entry.name).toLowerCase();
+            if (languageMap[ext]) {
+              foundLanguages.add(languageMap[ext]);
             }
-          } catch {
-            // Ignore subfolder permission errors
+          } else if (entry.isDirectory() && !entry.name.startsWith(".") && !ignoredDirs.has(entry.name)) {
+            scanDir(path.join(dir, entry.name), depth + 1);
           }
         }
-      }
-    } catch {
-      // Ignore root read errors
-    }
+      } catch {}
+    };
 
+    scanDir(rootPath, 0);
     return Array.from(foundLanguages);
   }
 }

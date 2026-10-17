@@ -5,11 +5,23 @@ import { OpenCodeLauncher } from "./opencode/opencodeLauncher";
 import { CodeSentinelMcpServer } from "./mcp/mcpServer";
 import { SidebarProvider } from "./ui/sidebarProvider";
 import { DockerClient } from "./docker/dockerClient";
+import { DependencyManager } from "./services/dependencyManager";
+import { SecurityToolManager } from "./scanner/securityToolManager";
 
 let statusBarItem: vscode.StatusBarItem;
 
 export function activate(context: vscode.ExtensionContext) {
   console.log("CodeSentinel extension activating...");
+
+  // Initialize self-contained extension storage directory
+  const storagePath = context.globalStorageUri.fsPath;
+  SecurityToolManager.getInstance().setStoragePath(storagePath);
+  DependencyManager.getInstance().setStoragePath(storagePath);
+
+  // Auto-bootstrap host-native dependencies (OpenCode CLI, Atlas Semantic Engine, & SAST tools)
+  DependencyManager.getInstance().ensureDependencies(context).catch((err) => {
+    console.warn("Dependency auto-check warning:", err?.message);
+  });
 
   const workspaceManager = WorkspaceManager.getInstance();
   workspaceManager.registerWatchers(context);
@@ -48,11 +60,11 @@ export function activate(context: vscode.ExtensionContext) {
     }
     try {
       const config = vscode.workspace.getConfiguration("codesentinel");
-      const backendMode = config.get<string>("backendMode", "local-docker");
       const mcpScriptPath = path.join(context.extensionUri.fsPath, "dist", "mcp-server.js");
       await opencodeLauncher.syncWorkspaceConfig(rootPath, mcpScriptPath, {
-        useDocker: backendMode === "local-docker",
+        useDocker: false,
         imageName: config.get<string>("dockerImage", "codesentinel/core:latest"),
+        extensionPath: context.extensionUri.fsPath,
       });
       lastSyncedRoot = rootPath;
     } catch (e: any) {
@@ -179,18 +191,16 @@ export function activate(context: vscode.ExtensionContext) {
       );
       try {
         const config = vscode.workspace.getConfiguration("codesentinel");
-        const backendMode = config.get<string>("backendMode", "local-docker");
         const configPath = await opencodeLauncher.syncWorkspaceConfig(
           activeWorkspace,
           mcpScriptPath,
           {
-            useDocker: backendMode === "local-docker",
+            useDocker: false,
             imageName: config.get<string>("dockerImage", "codesentinel/core:latest"),
           }
         );
-        const modeDesc = backendMode === "local-docker" ? "Docker container" : "Host runtime";
         vscode.window.showInformationMessage(
-          `CodeSentinel: Linked MCP server (${modeDesc}) in ${configPath}`
+          `CodeSentinel: Linked MCP server (Self-Contained Local Runtime) in ${configPath}`
         );
         workspaceManager.refreshContext();
         sidebarProvider.updateWebviewContent();
@@ -202,13 +212,13 @@ export function activate(context: vscode.ExtensionContext) {
     }
   );
 
-  // 5. Command: Toggle Backend Mode
+  // 5. Command: Toggle Backend Mode (local <-> cloud)
   const cmdToggleBackend = vscode.commands.registerCommand(
     "codesentinel.toggleBackendMode",
     async () => {
       const config = vscode.workspace.getConfiguration("codesentinel");
-      const current = config.get<string>("backendMode", "local-docker");
-      const updated = current === "local-docker" ? "cloud" : "local-docker";
+      const current = config.get<string>("backendMode", "local");
+      const updated = current === "local" ? "cloud" : "local";
       await config.update(
         "backendMode",
         updated,
@@ -221,41 +231,12 @@ export function activate(context: vscode.ExtensionContext) {
     }
   );
 
-  // 6. Command: Deploy / Build Unified Container Image
+  // 6. Command: Deploy / Build Unified Container Image (Deprecated: CodeSentinel is local self-contained)
   const cmdBuildContainer = vscode.commands.registerCommand(
     "codesentinel.buildContainer",
     async () => {
-      const dockerClient = DockerClient.getInstance();
-      const avail = await dockerClient.checkDockerAvailability();
-      if (!avail.available) {
-        vscode.window.showErrorMessage(
-          `CodeSentinel: Docker is not running or not installed. Error: ${avail.error}`
-        );
-        return;
-      }
-      await vscode.window.withProgress(
-        {
-          location: vscode.ProgressLocation.Notification,
-          title: "CodeSentinel: Deploying unified container (codesentinel/core:latest)...",
-          cancellable: false,
-        },
-        async (progress) => {
-          progress.report({ message: "Packaging Atlas engine, OpenCode, and MCP tools..." });
-          const res = await dockerClient.buildBackendImage(
-            context.extensionUri.fsPath,
-            "codesentinel/core:latest"
-          );
-          if (res.success) {
-            vscode.window.showInformationMessage(
-              "CodeSentinel: Unified container image (codesentinel/core:latest) deployed successfully!"
-            );
-          } else {
-            vscode.window.showErrorMessage(
-              `CodeSentinel: Container deployment failed: ${res.output}`
-            );
-          }
-          sidebarProvider.updateWebviewContent();
-        }
+      vscode.window.showInformationMessage(
+        "CodeSentinel is running directly as a self-contained extension with zero Docker requirements."
       );
     }
   );
@@ -298,6 +279,48 @@ export function activate(context: vscode.ExtensionContext) {
     }
   );
 
+  // 9. Command: Install / Verify Host Dependencies (OpenCode & Atlas)
+  const cmdInstallDependencies = vscode.commands.registerCommand(
+    "codesentinel.installDependencies",
+    async () => {
+      await DependencyManager.getInstance().ensureDependencies(context);
+      vscode.window.showInformationMessage("CodeSentinel: Host dependencies verified and ready.");
+    }
+  );
+
+  // 10. Command: Run Cloud Security Audit with OpenCode
+  const cmdRunCloudSecurityAudit = vscode.commands.registerCommand(
+    "codesentinel.runCloudSecurityAudit",
+    async () => {
+      const activeWorkspace = await ensureWorkspaceFolder();
+      if (!activeWorkspace) return;
+
+      // Ensure dependencies & skills are provisioned before triggering audit
+      await DependencyManager.getInstance().ensureDependencies(context);
+      await opencodeLauncher.provisionSkills(activeWorkspace, context.extensionUri.fsPath);
+
+      const prompt =
+        "Run a comprehensive cloud security and trust boundary audit on this repository using the @cloud-security-audit skill. " +
+        "Leverage CodeSentinel AST MCP tools (codesentinel_search_symbols, codesentinel_call_hierarchy, codesentinel_find_path) " +
+        "to map trust boundaries, audit IAM & cloud SDK calls, verify attack paths, and generate SECURITY-AUDIT-REPORT.md and security-audit-report.json.";
+
+      opencodeLauncher.launchTerminal(activeWorkspace, prompt);
+    }
+  );
+
+  // 11. Command: Manually Provision Security Audit Skills to OpenCode
+  const cmdProvisionSkills = vscode.commands.registerCommand(
+    "codesentinel.provisionSkills",
+    async () => {
+      const activeWorkspace = await ensureWorkspaceFolder();
+      if (!activeWorkspace) return;
+      const res = await opencodeLauncher.provisionSkills(activeWorkspace, context.extensionUri.fsPath);
+      vscode.window.showInformationMessage(
+        `CodeSentinel: Cloud Security Audit skill provisioned to ${res.workspaceSkillPath}`
+      );
+    }
+  );
+
   context.subscriptions.push(
     cmdLaunchTerminal,
     cmdLaunchWeb,
@@ -308,7 +331,10 @@ export function activate(context: vscode.ExtensionContext) {
     cmdToggleBackend,
     cmdBuildContainer,
     cmdOpenGraph,
-    cmdIndexAtlas
+    cmdIndexAtlas,
+    cmdInstallDependencies,
+    cmdRunCloudSecurityAudit,
+    cmdProvisionSkills
   );
 
   // Auto-launch OpenCode if user configured it
@@ -342,4 +368,5 @@ function updateStatusBar(workspaceManager: WorkspaceManager): void {
 export function deactivate() {
   const launcher = OpenCodeLauncher.getInstance();
   launcher.stopHeadlessServer();
+  launcher.stopWebProcess();
 }

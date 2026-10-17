@@ -1,0 +1,98 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CodeSentinelCloudSecurityAuditReport",
+  "type": "object",
+  "required": ["version", "target", "timestamp", "summary", "findings"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "enum": ["1.0.0"]
+    },
+    "target": {
+      "type": "object",
+      "required": ["workspaceName", "rootPath"],
+      "properties": {
+        "workspaceName": { "type": "string" },
+        "rootPath": { "type": "string" },
+        "detectedLanguages": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "cloudProviders": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "summary": {
+      "type": "object",
+      "required": ["totalFindings", "critical", "high", "medium", "low"],
+      "properties": {
+        "totalFindings": { "type": "integer", "minimum": 0 },
+        "critical": { "type": "integer", "minimum": 0 },
+        "high": { "type": "integer", "minimum": 0 },
+        "medium": { "type": "integer", "minimum": 0 },
+        "low": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "severity",
+          "cvssScore",
+          "cwe",
+          "affectedFile",
+          "startLine",
+          "endLine",
+          "description",
+          "remediation"
+        ],
+        "properties": {
+          "id": { "type": "string" },
+          "title": { "type": "string" },
+          "severity": {
+            "type": "string",
+            "enum": ["Critical", "High", "Medium", "Low", "Informational"]
+          },
+          "cvssScore": { "type": "number", "minimum": 0.0, "maximum": 10.0 },
+          "cvssVector": { "type": "string" },
+          "cwe": { "type": "string" },
+          "category": {
+            "type": "string",
+            "enum": [
+              "IAM & Privilege Escalation",
+              "Data Exfiltration & Storage",
+              "SSRF & Metadata Abuse",
+              "Serverless & Container Isolation",
+              "Cloud Service & NoSQL Injection",
+              "Authentication & Token Flaws",
+              "Hardcoded Secrets & Infrastructure",
+              "Other"
+            ]
+          },
+          "affectedFile": { "type": "string" },
+          "startLine": { "type": "integer", "minimum": 1 },
+          "endLine": { "type": "integer", "minimum": 1 },
+          "source": { "type": "string" },
+          "sink": { "type": "string" },
+          "description": { "type": "string" },
+          "exploitScenario": { "type": "string" },
+          "remediation": { "type": "string" },
+          "remediationDiff": { "type": "string" },
+          "dataflowTrace": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

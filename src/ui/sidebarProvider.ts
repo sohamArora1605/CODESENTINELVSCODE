@@ -6,11 +6,20 @@ import { OpenCodeLauncher } from "../opencode/opencodeLauncher";
 import { CodeSentinelMcpServer } from "../mcp/mcpServer";
 import { DockerClient } from "../docker/dockerClient";
 import { GraphService } from "../graph/graphService";
+import { VulnerabilityScanner } from "../scanner/vulnerabilityScanner";
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = "codesentinel.controlCenter";
   private _view?: vscode.WebviewView;
   private _hasContainerImage: boolean = false;
+  private _outputChannel?: vscode.OutputChannel;
+
+  private getOutputChannel(): vscode.OutputChannel {
+    if (!this._outputChannel) {
+      this._outputChannel = vscode.window.createOutputChannel("CodeSentinel: Vulnerability Scanner");
+    }
+    return this._outputChannel;
+  }
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
@@ -27,8 +36,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         if (rootChanged || !this._opencodeLauncher.isWebRunning()) {
           try {
-            await this._opencodeLauncher.startWebProcess(workspace.rootPath);
-            const serverUrl = this._opencodeLauncher.getWebServerUrl();
+            const serverUrl = await this._ensureMcpAndStart(workspace.rootPath);
             if (serverUrl && this._view) {
               this._view.webview.postMessage({ command: "setServerUrl", url: serverUrl });
             }
@@ -61,9 +69,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         path.normalize(activeRoot).toLowerCase() !== path.normalize(workspace.rootPath).toLowerCase();
 
       if (rootChanged || !this._opencodeLauncher.isWebRunning()) {
-        this._opencodeLauncher.startWebProcess(workspace.rootPath)
-          .then(() => {
-            const serverUrl = this._opencodeLauncher.getWebServerUrl();
+        this._ensureMcpAndStart(workspace.rootPath)
+          .then((serverUrl) => {
             if (serverUrl && this._view) {
               this._view.webview.postMessage({ command: "setServerUrl", url: serverUrl });
             }
@@ -90,8 +97,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             return;
           }
           try {
-            await this._opencodeLauncher.startWebProcess(workspace.rootPath);
-            const serverUrl = this._opencodeLauncher.getWebServerUrl();
+            const serverUrl = await this._ensureMcpAndStart(workspace.rootPath);
             if (serverUrl && this._view) {
               this._view.webview.postMessage({ command: "setServerUrl", url: serverUrl });
             } else {
@@ -106,8 +112,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         case "reloadChat": {
           if (!workspace) return;
           try {
-            await this._opencodeLauncher.startWebProcess(workspace.rootPath);
-            const serverUrl = this._opencodeLauncher.getWebServerUrl();
+            await this._opencodeLauncher.stopWebProcess();
+            const serverUrl = await this._ensureMcpAndStart(workspace.rootPath);
             if (serverUrl && this._view) {
               this._view.webview.postMessage({ command: "setServerUrl", url: serverUrl });
             } else {
@@ -116,6 +122,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           } catch (err: any) {
             vscode.window.showErrorMessage(`Failed to start OpenCode: ${err.message}`);
           }
+          break;
+        }
+
+        case "stopChat": {
+          await this._opencodeLauncher.stopWebProcess();
+          this.updateWebviewContent();
+          vscode.window.showInformationMessage("CodeSentinel: Security Agent stopped.");
           break;
         }
 
@@ -149,14 +162,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           }
           try {
             const config = vscode.workspace.getConfiguration("codesentinel");
-            const backendMode = config.get<string>("backendMode", "local-docker");
             const mcpScript = path.join(this._extensionUri.fsPath, "dist", "mcp-server.js");
             const configPath = await this._opencodeLauncher.syncWorkspaceConfig(workspace.rootPath, mcpScript, {
-              useDocker: backendMode === "local-docker",
+              useDocker: false,
               imageName: config.get<string>("dockerImage", "codesentinel/core:latest"),
             });
-            const modeDesc = backendMode === "local-docker" ? "Docker container (codesentinel/core:latest)" : "Host runtime";
-            vscode.window.showInformationMessage(`CodeSentinel: OpenCode MCP linked via ${modeDesc} at ${configPath}`);
+            vscode.window.showInformationMessage(`CodeSentinel: OpenCode MCP linked via host runtime at ${configPath}`);
             this._workspaceManager.refreshContext();
             this.updateWebviewContent();
           } catch (err: any) {
@@ -174,18 +185,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         case "indexAtlas": {
           if (!workspace) {
             vscode.window.showErrorMessage("CodeSentinel: Please open a project repository folder first.");
-            return;
-          }
-          const hasImage = await DockerClient.getInstance().checkImageExists("codesentinel/core:latest");
-          if (!hasImage) {
-            const pick = await vscode.window.showWarningMessage(
-              "CodeSentinel unified container image (codesentinel/core:latest) is not yet built. Build it now?",
-              "Deploy Container",
-              "Cancel"
-            );
-            if (pick === "Deploy Container") {
-              await vscode.commands.executeCommand("codesentinel.buildContainer");
-            }
             return;
           }
           vscode.window.withProgress(
@@ -212,10 +211,99 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           break;
         }
 
+        case "startVulnerabilityScan": {
+          if (!workspace) {
+            vscode.window.showErrorMessage("CodeSentinel: Please open a project repository folder first.");
+            return;
+          }
+          try {
+            const out = this.getOutputChannel();
+            out.clear();
+            out.appendLine(`================================================================================`);
+            out.appendLine(`[CodeSentinel] Multi-Tool Vulnerability Scan - ${new Date().toLocaleString()}`);
+            out.appendLine(`Target Workspace: ${workspace.rootPath}`);
+            out.appendLine(`Engines: Universal SAST, Secret Detector, Atlas AST Graph, Dependency CVE Auditor`);
+            out.appendLine(`================================================================================`);
+
+            const scanner = VulnerabilityScanner.getInstance();
+            const result = await scanner.scanProject(workspace.rootPath, (scanned, total, file, log) => {
+              this._view?.webview.postMessage({
+                command: "vulScanProgress",
+                scanned,
+                total,
+                file,
+                log,
+              });
+              if (log) {
+                out.appendLine(`[${log.timestamp}] [${log.engine}] ${log.message}${log.detail ? " -> " + log.detail : ""}`);
+              }
+            });
+            this._view?.webview.postMessage({
+              command: "vulScanComplete",
+              result,
+            });
+            out.appendLine(`--------------------------------------------------------------------------------`);
+            out.appendLine(`Scan Finished: ${result.summary.total} total clubbed findings (Critical: ${result.summary.critical}, High: ${result.summary.high}, Medium: ${result.summary.medium}, Low: ${result.summary.low})`);
+            out.appendLine(`Scanned: ${result.scannedFilesCount} files | Skipped/Ignored: ${result.ignoredFilesCount} media/git files`);
+            out.appendLine(`================================================================================\n`);
+          } catch (err: any) {
+            this._view?.webview.postMessage({
+              command: "vulScanError",
+              message: err.message,
+            });
+            this.getOutputChannel().appendLine(`[ERROR] Vulnerability scan failed: ${err.message}`);
+          }
+          break;
+        }
+
+        case "showOutputChannel": {
+          this.getOutputChannel().show(true);
+          break;
+        }
+
+        case "traceVulnerabilityGraph": {
+          if (!workspace) return;
+          try {
+            const graphService = GraphService.getInstance();
+            let targetSymbol = data.symbolName;
+            if (!targetSymbol && data.filePath && data.line) {
+              const syms = graphService.searchSymbols(workspace.rootPath, "", 20, "callables", data.filePath);
+              const match = syms.find((s) => s.startLine <= data.line && s.endLine >= data.line);
+              if (match) targetSymbol = match.name;
+            }
+            if (!targetSymbol && data.filePath) {
+              const fileSyms = graphService.searchSymbols(workspace.rootPath, "", 5, "callables", data.filePath);
+              if (fileSyms.length > 0) targetSymbol = fileSyms[0].name;
+            }
+
+            if (targetSymbol) {
+              const res = graphService.analyzeImpact(workspace.rootPath, targetSymbol, "downstream", 3, 12);
+              this._view?.webview.postMessage({
+                command: "selectTab",
+                tabId: "tab-graph",
+              });
+              this._view?.webview.postMessage({
+                command: "impactResult",
+                result: { ...res, isTainted: true },
+              });
+            } else {
+              vscode.window.showWarningMessage(`AST symbol not directly mapped for line ${data.line}. Opening file dependencies in Code Graph.`);
+              this._view?.webview.postMessage({
+                command: "selectTab",
+                tabId: "tab-graph",
+              });
+              vscode.commands.executeCommand("codesentinel.openCodeGraph");
+            }
+          } catch (err: any) {
+            vscode.window.showErrorMessage(`Blast radius trace failed: ${err.message}`);
+          }
+          break;
+        }
+
         case "toggleBackendMode": {
           const config = vscode.workspace.getConfiguration("codesentinel");
-          const current = config.get<string>("backendMode", "local-docker");
-          const updated = current === "local-docker" ? "cloud" : "local-docker";
+          const current = config.get<string>("backendMode", "local");
+          const updated = current === "local" ? "cloud" : "local";
           await config.update("backendMode", updated, vscode.ConfigurationTarget.Global);
           vscode.window.showInformationMessage(`CodeSentinel: Backend execution mode switched to ${updated}.`);
           this.updateWebviewContent();
@@ -329,6 +417,51 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           break;
         }
 
+        case "getFlowDiagram": {
+          if (!workspace) return;
+          try {
+            const graphService = GraphService.getInstance();
+            let flow = graphService.getSavedFlowDiagram(workspace.rootPath);
+            if (!flow && data.topic) {
+              flow = graphService.explainFlow(workspace.rootPath, data.topic);
+            }
+            this._view?.webview.postMessage({ command: "flowResult", flow });
+          } catch (err: any) {
+            this._view?.webview.postMessage({
+              command: "flowResult",
+              flow: {
+                topic: data.topic || "Overview",
+                summary: `Flow unavailable: ${err.message}`,
+                steps: [],
+                mermaidDiagram: "flowchart TD\n  Err[Index Not Ready]",
+                graph: { nodes: [], edges: [] },
+              },
+            });
+          }
+          break;
+        }
+
+        case "runExplainFlow": {
+          if (!workspace) return;
+          try {
+            const graphService = GraphService.getInstance();
+            const flow = graphService.explainFlow(workspace.rootPath, data.topic || "login", data.entrySymbol);
+            this._view?.webview.postMessage({ command: "flowResult", flow });
+          } catch (err: any) {
+            this._view?.webview.postMessage({
+              command: "flowResult",
+              flow: {
+                topic: data.topic || "Error",
+                summary: `Flow error: ${err.message}`,
+                steps: [],
+                mermaidDiagram: "flowchart TD\n  Err[Analysis Error]",
+                graph: { nodes: [], edges: [] },
+              },
+            });
+          }
+          break;
+        }
+
         case "getCodeSnippet": {
           if (!workspace) return;
           const graphService = GraphService.getInstance();
@@ -373,12 +506,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     this.refreshContainerStatus();
   }
 
+  private async _ensureMcpAndStart(rootPath: string): Promise<string> {
+    const config = vscode.workspace.getConfiguration("codesentinel");
+    const mcpScript = path.join(this._extensionUri.fsPath, "dist", "mcp-server.js");
+    await this._opencodeLauncher.syncWorkspaceConfig(rootPath, mcpScript, {
+      useDocker: false,
+      imageName: config.get<string>("dockerImage", "codesentinel/core:latest"),
+    });
+    const res = await this._opencodeLauncher.startWebProcess(rootPath);
+    return res.url;
+  }
+
   public async refreshContainerStatus(): Promise<void> {
-    try {
-      this._hasContainerImage = await DockerClient.getInstance().checkImageExists("codesentinel/core:latest");
-    } catch {
-      this._hasContainerImage = false;
-    }
+    this._hasContainerImage = false;
   }
 
   public updateWebviewContent(): void {
@@ -396,7 +536,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   private getHtmlContent(_webview: vscode.Webview): string {
     const workspace = this._workspaceManager.getContext();
     const config = vscode.workspace.getConfiguration("codesentinel");
-    const backendMode = config.get<string>("backendMode", "local-docker");
+    const backendMode = config.get<string>("backendMode", "local");
     const tools = this._mcpServer.getRegisteredTools();
     const serverUrl = this._opencodeLauncher.getWebServerUrl();
     const isWebRunning = this._opencodeLauncher.isWebRunning();
@@ -591,6 +731,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         /* Ensure other tab panes stack cleanly above when active */
         #tab-workspace.tab-pane.active,
+        #tab-vuls.tab-pane.active,
         #tab-tools.tab-pane.active {
           z-index: 50;
           background: #0f1117;
@@ -951,8 +1092,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           border-color: rgba(52, 211, 153, 0.5);
         }
         .graph-node-card.tainted-node {
-          border-color: #f43f5e;
-          box-shadow: 0 0 16px rgba(244, 63, 94, 0.5);
+          border-color: #f43f5e !important;
+          background: rgba(85, 15, 28, 0.96) !important;
+          box-shadow: 0 0 22px rgba(244, 63, 94, 0.8) !important;
         }
 
         .node-top-bar {
@@ -1320,6 +1462,395 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           color: var(--text-muted);
           margin-top: 2px;
         }
+
+        /* Vulnerability Scanner Tab Styles */
+        #tab-vuls.tab-pane {
+          display: none !important;
+          flex-direction: column;
+          position: absolute;
+          inset: 0;
+          height: 100%;
+          width: 100%;
+          overflow-y: auto;
+          padding: 8px;
+          background: #0d1117;
+          z-index: 1;
+        }
+
+        #tab-vuls.tab-pane.active {
+          display: flex !important;
+          z-index: 50;
+        }
+
+        /* Vulnerability Scanner Tab Styles (Unified Professional Design System) */
+        #tab-vuls.tab-pane {
+          display: none !important;
+          flex-direction: column;
+          position: absolute;
+          inset: 0;
+          height: 100%;
+          width: 100%;
+          overflow-y: auto;
+          padding: 8px 10px;
+          background: #0f1117;
+          z-index: 1;
+        }
+
+        #tab-vuls.tab-pane.active {
+          display: flex !important;
+          z-index: 50;
+        }
+
+        .vul-header-bar {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          padding: 8px 10px;
+          background: rgba(18, 20, 26, 0.95);
+          border: 1px solid var(--card-border);
+          border-radius: 6px;
+          margin-bottom: 8px;
+        }
+
+        .vul-scan-row {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px;
+        }
+
+        .vul-status-wrapper {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          overflow: hidden;
+        }
+
+        .vul-metrics-pills-row {
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          margin-top: 4px;
+          overflow-x: auto;
+          padding-bottom: 2px;
+        }
+
+        .vul-pill {
+          padding: 2px 7px;
+          border-radius: 4px;
+          font-size: 10px;
+          font-weight: 600;
+          font-family: monospace;
+          background: rgba(255, 255, 255, 0.04);
+          border: 1px solid var(--card-border);
+          color: var(--text-muted);
+          transition: all 0.15s;
+          cursor: pointer;
+          user-select: none;
+          white-space: nowrap;
+        }
+        .vul-pill:hover {
+          background: rgba(255, 255, 255, 0.08);
+          color: var(--text-main);
+        }
+        .vul-pill.active {
+          border-color: var(--accent-blue);
+          background: rgba(56, 189, 248, 0.14);
+          color: var(--accent-blue);
+        }
+
+        .pill-total { color: var(--text-main); }
+        .pill-critical { color: #f87171; border-color: rgba(239, 68, 68, 0.25); background: rgba(239, 68, 68, 0.08); }
+        .pill-high { color: #fb923c; border-color: rgba(249, 115, 22, 0.25); background: rgba(249, 115, 22, 0.08); }
+        .pill-medium { color: #facc15; border-color: rgba(234, 179, 8, 0.25); background: rgba(234, 179, 8, 0.08); }
+        .pill-low { color: #38bdf8; border-color: rgba(56, 189, 248, 0.25); background: rgba(56, 189, 248, 0.08); }
+
+        .vul-card {
+          background: var(--card-bg);
+          border: 1px solid var(--card-border);
+          border-radius: 6px;
+          padding: 10px 12px;
+          margin-bottom: 8px;
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          cursor: pointer;
+          transition: all 0.2s ease;
+          backdrop-filter: blur(8px);
+        }
+
+        .vul-card:hover {
+          border-color: var(--accent-blue);
+          transform: translateY(-1px);
+          box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+        }
+
+        .vul-card.sev-critical-border { border-left: 3px solid #ef4444; }
+        .vul-card.sev-high-border { border-left: 3px solid #f97316; }
+        .vul-card.sev-medium-border { border-left: 3px solid #eab308; }
+        .vul-card.sev-low-border { border-left: 3px solid #38bdf8; }
+
+        .vul-badge-row {
+          display: flex;
+          align-items: center;
+          flex-wrap: wrap;
+          gap: 4px;
+        }
+
+        .vul-badge {
+          font-size: 9px;
+          font-weight: 700;
+          padding: 1px 6px;
+          border-radius: 3px;
+          text-transform: uppercase;
+        }
+
+        .vul-badge.sev-critical { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.35); }
+        .vul-badge.sev-high { background: rgba(249, 115, 22, 0.2); color: #fb923c; border: 1px solid rgba(249, 115, 22, 0.35); }
+        .vul-badge.sev-medium { background: rgba(234, 179, 8, 0.2); color: #facc15; border: 1px solid rgba(234, 179, 8, 0.35); }
+        .vul-badge.sev-low { background: rgba(56, 189, 248, 0.2); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); }
+
+        .vul-badge.cwe-badge {
+          background: rgba(168, 85, 247, 0.15);
+          color: #c084fc;
+          border: 1px solid rgba(168, 85, 247, 0.3);
+        }
+
+        .vul-badge.tools-badge {
+          background: rgba(255, 255, 255, 0.06);
+          color: var(--text-muted);
+          border: 1px solid var(--card-border);
+          text-transform: none;
+        }
+
+        .vul-title {
+          font-size: 12px;
+          font-weight: 600;
+          color: #ffffff;
+        }
+
+        .vul-loc {
+          font-size: 10px;
+          font-family: var(--vscode-editor-font-family, monospace);
+          color: var(--accent-blue);
+        }
+
+        .vul-code-snippet {
+          background: #0d1117;
+          border: 1px solid var(--card-border);
+          border-radius: 4px;
+          padding: 6px 8px;
+          font-family: var(--vscode-editor-font-family, monospace);
+          font-size: 10px;
+          color: #e6edf3;
+          white-space: pre-wrap;
+          word-break: break-all;
+          max-height: 80px;
+          overflow-y: auto;
+        }
+
+        .vul-desc {
+          font-size: 11px;
+          color: var(--text-muted);
+          line-height: 1.4;
+        }
+
+        .vul-remediation {
+          font-size: 10px;
+          color: #e2e8f0;
+          background: rgba(56, 189, 248, 0.06);
+          border-left: 2px solid var(--accent-blue);
+          padding: 5px 8px;
+          border-radius: 0 4px 4px 0;
+        }
+
+        .vul-card-footer {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding-top: 5px;
+          border-top: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .vul-dblclick-hint {
+          font-size: 9px;
+          color: var(--text-muted);
+          opacity: 0.8;
+        }
+
+        .btn-trace-vul {
+          background: rgba(56, 189, 248, 0.12);
+          color: var(--accent-blue);
+          border: 1px solid rgba(56, 189, 248, 0.3);
+          padding: 3px 8px;
+          border-radius: 4px;
+          font-size: 10px;
+          font-weight: 600;
+          cursor: pointer;
+          transition: all 0.15s ease;
+          display: flex;
+          align-items: center;
+          gap: 4px;
+        }
+        .btn-trace-vul:hover {
+          background: rgba(56, 189, 248, 0.25);
+          border-color: var(--accent-blue);
+          color: #ffffff;
+        }
+
+        .badge-count {
+          background: #ef4444;
+          color: #fff;
+          font-size: 9px;
+          font-weight: 800;
+          padding: 1px 5px;
+          border-radius: 10px;
+          margin-left: 3px;
+        }
+
+        /* 4-Engine Status Chips */
+        .vul-tools-grid {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 6px;
+          margin-top: 6px;
+        }
+
+        .vul-tool-chip {
+          background: rgba(0, 0, 0, 0.3);
+          border: 1px solid var(--card-border);
+          border-radius: 4px;
+          padding: 6px 8px;
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+          transition: all 0.15s ease;
+        }
+
+        .vul-tool-chip:hover {
+          border-color: var(--accent-blue);
+          background: rgba(30, 36, 48, 0.5);
+        }
+
+        .tool-chip-header {
+          display: flex;
+          align-items: center;
+          gap: 4px;
+        }
+
+        .tool-chip-icon {
+          font-size: 11px;
+        }
+
+        .tool-chip-name {
+          font-size: 10px;
+          font-weight: 600;
+          color: var(--text-muted);
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        .tool-chip-stat {
+          font-size: 11px;
+          font-weight: 700;
+          font-family: monospace;
+          color: var(--accent-blue);
+        }
+
+        .tool-chip-stat.has-findings {
+          color: #f87171;
+        }
+
+        /* Live Tool Execution Logs Console */
+        .vul-logs-section {
+          background: rgba(18, 22, 30, 0.95);
+          border: 1px solid var(--card-border);
+          border-radius: 6px;
+          margin-top: 8px;
+          overflow: hidden;
+          display: flex;
+          flex-direction: column;
+        }
+
+        .vul-logs-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 6px 8px;
+          background: rgba(14, 17, 24, 0.95);
+          border-bottom: 1px solid var(--card-border);
+          font-size: 10px;
+          font-weight: 600;
+          cursor: pointer;
+          user-select: none;
+        }
+
+        .vul-logs-header:hover {
+          background: rgba(22, 27, 34, 0.95);
+        }
+
+        .vul-logs-terminal {
+          max-height: 170px;
+          min-height: 80px;
+          overflow-y: auto;
+          padding: 6px 8px;
+          font-family: var(--vscode-editor-font-family, monospace);
+          font-size: 10px;
+          line-height: 1.45;
+          background: #090c10;
+          display: flex;
+          flex-direction: column;
+          gap: 3px;
+        }
+
+        .log-entry {
+          display: flex;
+          align-items: flex-start;
+          gap: 5px;
+          word-break: break-all;
+        }
+
+        .log-time {
+          color: var(--text-muted);
+          font-size: 9px;
+          white-space: nowrap;
+          opacity: 0.7;
+          flex-shrink: 0;
+        }
+
+        .log-engine-badge {
+          font-size: 8px;
+          font-weight: 800;
+          padding: 1px 4px;
+          border-radius: 3px;
+          text-transform: uppercase;
+          flex-shrink: 0;
+        }
+
+        .badge-engine-filter, .badge-engine-pre-filter { background: rgba(56, 189, 248, 0.15); color: #38bdf8; }
+        .badge-engine-sast { background: rgba(168, 85, 247, 0.2); color: #c084fc; }
+        .badge-engine-secrets { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
+        .badge-engine-atlas-ast { background: rgba(52, 211, 153, 0.2); color: #34d399; }
+        .badge-engine-dependencies { background: rgba(59, 130, 246, 0.2); color: #60a5fa; }
+        .badge-engine-consensus { background: rgba(244, 63, 94, 0.2); color: #fb7185; }
+
+        .log-msg {
+          color: #e2e8f0;
+          flex: 1;
+        }
+
+        .log-msg.level-warn {
+          color: #fbbf24;
+        }
+
+        .log-msg.level-error {
+          color: #f87171;
+        }
+
+        .log-msg.level-success {
+          color: #4ade80;
+        }
       </style>
     </head>
     <body>
@@ -1332,6 +1863,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
               <path d="M9 12l2 2 4-4"/>
             </svg>
             <span>Security Agent</span>
+          </button>
+          <button class="tab-btn" data-tab="tab-vuls" title="Vulnerabilities">
+            <svg class="tab-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+              <line x1="12" y1="9" x2="12" y2="13"/>
+              <line x1="12" y1="17" x2="12.01" y2="17"/>
+            </svg>
+            <span>Vulnerabilities</span>
+            <span id="vul-badge-count" class="badge-count" style="display: none;">0</span>
           </button>
           <button class="tab-btn" data-tab="tab-graph" title="360° Code Graph">
             <svg class="tab-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1382,6 +1922,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
                   </svg>
                 </button>
+                <button class="icon-btn" id="btn-stop-chat" title="Stop Security Agent" style="color: #f87171;">
+                  <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="4" y="4" width="16" height="16" rx="2" ry="2"/>
+                  </svg>
+                </button>
                 <button class="icon-btn" id="btn-terminal" title="Open Security Agent Terminal">
                   <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <polyline points="4 17 10 11 4 5"/>
@@ -1422,16 +1967,139 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             </div>
           </div>
 
+          <!-- TAB: Vulnerability Scanner -->
+          <div id="tab-vuls" class="tab-pane">
+            <div class="vul-header-bar">
+              <div class="vul-scan-row">
+                <button id="btn-start-vul-scan" class="pill-btn btn-action" style="padding: 6px 12px; font-size: 11px; display: flex; align-items: center; gap: 6px; box-shadow: 0 2px 8px rgba(56, 189, 248, 0.25);">
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+                  </svg>
+                  <span>Scan Entire Project</span>
+                </button>
+                <div class="vul-status-wrapper">
+                  <span class="status-dot" id="vul-status-dot" style="background: var(--accent-blue); box-shadow: 0 0 6px rgba(56, 189, 248, 0.6);"></span>
+                  <div id="vul-scan-status" class="status-indicator">Ready (4 consensus engines)</div>
+                </div>
+              </div>
+              <div id="vul-progress-container" style="display: none; width: 100%; height: 3px; background: rgba(255,255,255,0.08); border-radius: 2px; overflow: hidden; margin-top: 4px;">
+                <div id="vul-progress-bar" style="height: 100%; width: 0%; background: linear-gradient(90deg, #38bdf8, #818cf8); transition: width 0.15s;"></div>
+              </div>
+              
+              <!-- Metrics Summary Pills -->
+              <div class="vul-metrics-pills-row" id="vul-metrics-row">
+                <span class="vul-pill pill-total active" id="metric-vul-total" data-sev="all">Total: 0</span>
+                <span class="vul-pill pill-critical" id="metric-vul-critical" data-sev="Critical">Critical: 0</span>
+                <span class="vul-pill pill-high" id="metric-vul-high" data-sev="High">High: 0</span>
+                <span class="vul-pill pill-medium" id="metric-vul-medium" data-sev="Medium">Medium: 0</span>
+                <span class="vul-pill pill-low" id="metric-vul-low" data-sev="Low">Low: 0</span>
+              </div>
+
+              <!-- Search & Filter Row -->
+              <div class="vul-filter-row" style="display: flex; gap: 6px; margin-top: 4px;">
+                <input type="text" id="vul-search-input" class="graph-search-input" placeholder="🔍 Search findings (title, CWE, file path)..." autocomplete="off" />
+                <div class="category-pills" id="vul-severity-filters">
+                  <button class="pill-btn active" data-sev="all">All</button>
+                  <button class="pill-btn" data-sev="Critical">Crit</button>
+                  <button class="pill-btn" data-sev="High">High</button>
+                  <button class="pill-btn" data-sev="Medium">Med</button>
+                </div>
+              </div>
+
+              <!-- 4-Engine Activity Status Grid -->
+              <div class="vul-tools-grid" id="vul-tools-grid">
+                <div class="vul-tool-chip" id="tool-chip-sast" title="Opengrep / Semgrep Multi-Language AST SAST Engine (Zero regex)">
+                  <div class="tool-chip-header">
+                    <span class="tool-chip-icon">🛡️</span>
+                    <span class="tool-chip-name">Opengrep AST</span>
+                  </div>
+                  <div class="tool-chip-stat" id="stat-sast">Idle (0 findings)</div>
+                </div>
+                <div class="vul-tool-chip" id="tool-chip-secrets" title="Gitleaks Dedicated Enterprise Secret & Credential Detector">
+                  <div class="tool-chip-header">
+                    <span class="tool-chip-icon">🔑</span>
+                    <span class="tool-chip-name">Gitleaks Secrets</span>
+                  </div>
+                  <div class="tool-chip-stat" id="stat-secrets">Idle (0 leaks)</div>
+                </div>
+                <div class="vul-tool-chip" id="tool-chip-atlas" title="Atlas Code Graph AST SQLite Engine & Bandit Python AST Analyzer">
+                  <div class="tool-chip-header">
+                    <span class="tool-chip-icon">🌐</span>
+                    <span class="tool-chip-name">Atlas AST &amp; Bandit</span>
+                  </div>
+                  <div class="tool-chip-stat" id="stat-atlas">Idle (0 risks)</div>
+                </div>
+                <div class="vul-tool-chip" id="tool-chip-manifest" title="Google OSV-Scanner & Native Dependency Advisory Auditor">
+                  <div class="tool-chip-header">
+                    <span class="tool-chip-icon">📦</span>
+                    <span class="tool-chip-name">OSV &amp; Supply Chain</span>
+                  </div>
+                  <div class="tool-chip-stat" id="stat-manifest">Idle (0 advisories)</div>
+                </div>
+              </div>
+
+              <!-- Expandable Real-time Tool Execution Logs Console -->
+              <div class="vul-logs-section">
+                <div class="vul-logs-header" id="btn-toggle-vul-logs">
+                  <div style="display: flex; align-items: center; gap: 6px;">
+                    <span id="vul-logs-toggle-icon">▼</span>
+                    <strong>Tool Execution Logs</strong>
+                    <span class="badge" id="vul-logs-count-badge" style="background: rgba(56, 189, 248, 0.15); color: var(--accent-blue); font-size: 9px;">0 logs</span>
+                  </div>
+                  <div style="display: flex; align-items: center; gap: 4px;" onclick="event.stopPropagation();">
+                    <button class="pill-btn" id="btn-filter-log-findings" style="font-size: 9px; padding: 2px 5px;" title="Show only warnings & findings">Warnings Only</button>
+                    <button class="pill-btn" id="btn-show-output-channel" style="font-size: 9px; padding: 2px 5px;" title="Open in VS Code Output panel">Output Panel ↗</button>
+                    <button class="pill-btn" id="btn-clear-vul-logs" style="font-size: 9px; padding: 2px 5px;" title="Clear log window">Clear</button>
+                  </div>
+                </div>
+                <div class="vul-logs-terminal" id="vul-logs-terminal">
+                  <div class="log-placeholder" style="color: var(--text-muted); font-size: 10px; font-family: monospace; padding: 6px;">
+                    [SYSTEM] Ready. Click 'Scan Entire Project' to start multi-engine security analysis. Execution logs from all 4 tools will stream here in real-time.
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Findings Card Container -->
+            <div id="vul-findings-list" class="vul-findings-list" style="flex: 1; overflow-y: auto; padding: 4px 0;">
+              <div class="empty-vul-state" style="text-align: center; padding: 36px 16px; color: var(--text-muted);">
+                <div class="agent-logo-badge" style="margin: 0 auto 12px auto; width: 44px; height: 44px; border-radius: 10px;">
+                  <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="var(--accent-blue)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                    <path d="M9 12l2 2 4-4"/>
+                  </svg>
+                </div>
+                <div style="font-weight: 600; font-size: 13px; color: var(--text-main);">No Vulnerability Scan Run Yet</div>
+                <div style="font-size: 11px; margin-top: 6px; max-width: 250px; margin-left: auto; margin-right: auto; line-height: 1.4; color: var(--text-muted);">
+                  Click <strong>Scan Entire Project</strong> above to inspect this workspace using all 4 SAST, Secrets, AST, and Supply Chain engines.
+                </div>
+              </div>
+            </div>
+          </div>
+
           <!-- TAB: 360° Interactive Code Graph -->
           <div id="tab-graph" class="tab-pane">
             <div class="graph-header-bar">
               <!-- Top Mode Selector Pills -->
               <div class="graph-mode-pills-row">
                 <button class="pill-btn active" id="btn-mode-callgraph">Call Graph</button>
+                <button class="pill-btn" id="btn-mode-flow">Flow Explainer</button>
                 <button class="pill-btn" id="btn-mode-path">Path Finder</button>
                 <button class="pill-btn" id="btn-mode-impact">Blast Radius</button>
                 <button class="pill-btn" id="btn-mode-deps">Dependencies</button>
                 <button class="pill-btn" id="btn-mode-metrics">Metrics</button>
+              </div>
+
+              <!-- Toolbar 1b: Flow Explainer -->
+              <div id="toolbar-flow" class="graph-subtoolbar" style="display: none;">
+                <div class="graph-search-row">
+                  <input type="text" id="flow-topic-input" class="graph-search-input" placeholder="Architecture / Feature topic (e.g. login, auth, payment)..." autocomplete="off" />
+                  <button class="pill-btn btn-action" id="btn-run-flow">Explain Flow</button>
+                </div>
+                <div class="graph-filter-pills-row">
+                  <div id="flow-status-label" class="status-indicator">Dataflow &amp; execution sequence</div>
+                  <button class="pill-btn" id="btn-reload-saved-flow" title="Load latest diagram">↺ Refresh Diagram</button>
+                </div>
               </div>
 
               <!-- Toolbar 1: Call Graph Explorer -->
@@ -1592,23 +2260,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
               <div class="section-title" style="margin-top: 0;">Backend Execution</div>
               <div class="toggle-card">
                 <span style="font-size: 11px; font-weight: 600;">
-                  ${backendMode === "local-docker" ? "Local Container (Docker)" : "Cloud Endpoint (Remote)"}
+                  ${backendMode === "local" ? "Local Runtime (Self-Contained)" : "Cloud Endpoint (Remote)"}
                 </span>
                 <button id="btn-toggle-backend" class="btn-secondary">Switch</button>
               </div>
               <div class="meta-row" style="margin-top: 8px;">
-                <span class="label">Container Image:</span>
-                <span class="badge ${this._hasContainerImage ? "badge-success" : "badge-warn"}" style="font-family: monospace;">
-                  ${this._hasContainerImage ? "Ready (codesentinel/core:latest)" : "Not Built"}
+                <span class="label">Runtime:</span>
+                <span class="badge badge-success" style="font-family: monospace;">
+                  Native Extension Storage (Zero Docker)
                 </span>
               </div>
               <div class="meta-row">
-                <span class="label">Isolation:</span>
-                <span class="badge badge-success">Hermetic (Zero Host Pollution)</span>
+                <span class="label">Environment:</span>
+                <span class="badge badge-success">Self-Contained Data Directory</span>
               </div>
-              <button id="btn-deploy-container" class="btn-secondary" style="width: 100%; margin-top: 8px; padding: 6px 10px; font-weight: 600; text-align: center;">
-                ${this._hasContainerImage ? "🔄 Rebuild Container Image" : "🚀 Deploy Container Image"}
-              </button>
             </div>
 
             <button id="btn-sync" class="btn-primary" style="margin-top: 8px;">
@@ -1722,6 +2387,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             frame.src = frame.src;
           }
           vscode.postMessage({ command: 'reloadChat' });
+        });
+
+        document.getElementById('btn-stop-chat')?.addEventListener('click', () => {
+          vscode.postMessage({ command: 'stopChat' });
         });
 
         document.getElementById('btn-terminal')?.addEventListener('click', () => {
@@ -2277,10 +2946,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           });
         });
 
-        // 5-Mode Switching
+        // 6-Mode Switching
         let currentGraphMode = 'callgraph';
         const modeButtons = {
           callgraph: document.getElementById('btn-mode-callgraph'),
+          flow: document.getElementById('btn-mode-flow'),
           path: document.getElementById('btn-mode-path'),
           impact: document.getElementById('btn-mode-impact'),
           deps: document.getElementById('btn-mode-deps'),
@@ -2288,6 +2958,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         };
         const toolbars = {
           callgraph: document.getElementById('toolbar-callgraph'),
+          flow: document.getElementById('toolbar-flow'),
           path: document.getElementById('toolbar-path'),
           impact: document.getElementById('toolbar-impact'),
           deps: document.getElementById('toolbar-deps'),
@@ -2309,16 +2980,89 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
           if (mode === 'metrics') {
             vscode.postMessage({ command: 'getGraphStats' });
+          } else if (mode === 'flow') {
+            vscode.postMessage({ command: 'getFlowDiagram' });
           } else if (mode === 'callgraph' && graphState.rootSymbol) {
             vscode.postMessage({ command: 'getGraphData', symbolName: graphState.rootSymbol.name });
           }
         }
 
         modeButtons.callgraph?.addEventListener('click', () => switchGraphMode('callgraph'));
+        modeButtons.flow?.addEventListener('click', () => switchGraphMode('flow'));
         modeButtons.path?.addEventListener('click', () => switchGraphMode('path'));
         modeButtons.impact?.addEventListener('click', () => switchGraphMode('impact'));
         modeButtons.deps?.addEventListener('click', () => switchGraphMode('deps'));
         modeButtons.metrics?.addEventListener('click', () => switchGraphMode('metrics'));
+
+        // Flow Explainer Actions
+        document.getElementById('btn-run-flow')?.addEventListener('click', () => {
+          const topic = document.getElementById('flow-topic-input')?.value || 'login';
+          const statusEl = document.getElementById('flow-status-label');
+          if (statusEl) statusEl.textContent = 'Tracing dataflow for "' + topic + '"...';
+          vscode.postMessage({ command: 'runExplainFlow', topic });
+        });
+
+        document.getElementById('btn-reload-saved-flow')?.addEventListener('click', () => {
+          vscode.postMessage({ command: 'getFlowDiagram' });
+        });
+
+        function renderFlowGraph(flow) {
+          nodesContainerEl.innerHTML = '';
+          svgEl.querySelectorAll('path').forEach(p => p.remove());
+          graphState.nodes = {};
+          graphState.edges = flow.graph.edges || [];
+          graphState.rootSymbol = flow.graph.nodes && flow.graph.nodes[0] ? { name: flow.graph.nodes[0].name } : null;
+
+          const nodes = flow.graph.nodes || [];
+          const count = nodes.length;
+          const colSpacing = 240;
+          const rowOffset = 50;
+
+          nodes.forEach((n, idx) => {
+            const x = idx * colSpacing - ((count - 1) * colSpacing) / 2;
+            const y = (idx % 2 === 1) ? rowOffset : -rowOffset;
+            const card = document.createElement('div');
+            card.className = 'graph-node-card root-node';
+            card.style.left = x + 'px';
+            card.style.top = y + 'px';
+            card.dataset.name = n.name;
+
+            const fileName = n.path ? n.path.split('/').pop() : '';
+            card.innerHTML = 
+              '<div class="node-top-bar">' +
+                '<span class="node-kind-badge" style="background: rgba(168, 85, 247, 0.2); color: var(--accent-purple); font-weight: 700;">STEP ' + (n.step || idx + 1) + '</span>' +
+                '<span class="node-lang-pill" style="color: var(--accent-blue); font-weight: 600;">' + escapeClientHtml(n.role || 'stage') + '</span>' +
+              '</div>' +
+              '<div class="node-symbol-title" title="' + escapeClientHtml(n.name) + '">' + escapeClientHtml(n.name) + '</div>' +
+              '<div class="node-loc-sub" title="' + escapeClientHtml(n.path) + '">' + escapeClientHtml(fileName ? fileName + ':' + n.startLine : n.path) + '</div>' +
+              '<div style="font-size: 9px; color: var(--text-muted); margin-top: 4px; line-height: 1.3; max-height: 38px; overflow: hidden; text-overflow: ellipsis;">' + escapeClientHtml(n.description || '') + '</div>';
+
+            card.addEventListener('click', () => {
+              selectNode({
+                name: n.name,
+                kind: n.kind,
+                path: n.path,
+                startLine: n.startLine,
+                endLine: n.endLine,
+                signature: (n.role ? '[' + n.role + '] ' : '') + n.name + '()',
+                callerCount: idx > 0 ? 1 : 0,
+                calleeCount: idx < count - 1 ? 1 : 0,
+              });
+            });
+
+            card.addEventListener('dblclick', () => {
+              if (n.path) {
+                vscode.postMessage({ command: 'openInEditor', path: n.path, line: n.startLine });
+              }
+            });
+
+            nodesContainerEl.appendChild(card);
+            graphState.nodes[n.name] = { data: n, x, y, el: card };
+          });
+
+          drawEdges();
+          resetGraphCamera();
+        }
 
         // Path Finder Actions
         document.getElementById('btn-swap-path')?.addEventListener('click', () => {
@@ -2522,6 +3266,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
               }
               break;
             }
+            case 'flowResult': {
+              const flow = msg.flow;
+              const statusEl = document.getElementById('flow-status-label');
+              if (flow && flow.graph && flow.graph.nodes && flow.graph.nodes.length > 0) {
+                renderFlowGraph(flow);
+                if (statusEl) statusEl.textContent = flow.topic + ': ' + (flow.steps ? flow.steps.length : flow.graph.nodes.length) + ' stages traced';
+              } else {
+                if (statusEl) statusEl.textContent = 'No flow diagram found. Enter a topic and click "Explain Flow".';
+              }
+              break;
+            }
             case 'graphStats': {
               const s = msg.stats;
               if (s) {
@@ -2536,6 +3291,36 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
             case 'selectTab': {
               if (msg.tabId) selectTab(msg.tabId);
+              break;
+            }
+            case 'vulScanProgress': {
+              const statusEl = document.getElementById('vul-scan-status');
+              const barEl = document.getElementById('vul-progress-bar');
+              const containerEl = document.getElementById('vul-progress-container');
+              if (containerEl) containerEl.style.display = 'block';
+              if (statusEl) statusEl.textContent = 'Scanning: ' + msg.file + ' (' + msg.scanned + '/' + msg.total + ')';
+              if (barEl && msg.total > 0) {
+                const pct = Math.round((msg.scanned / msg.total) * 100);
+                barEl.style.width = pct + '%';
+              }
+              if (msg.log) {
+                appendVulLog(msg.log);
+              }
+              break;
+            }
+            case 'vulScanComplete': {
+              const containerEl = document.getElementById('vul-progress-container');
+              if (containerEl) containerEl.style.display = 'none';
+              const statusEl = document.getElementById('vul-scan-status');
+              if (statusEl) statusEl.textContent = 'Scan complete: ' + msg.result.summary.total + ' findings (' + msg.result.scannedFilesCount + ' files)';
+              handleVulScanComplete(msg.result);
+              break;
+            }
+            case 'vulScanError': {
+              const containerEl = document.getElementById('vul-progress-container');
+              if (containerEl) containerEl.style.display = 'none';
+              const statusEl = document.getElementById('vul-scan-status');
+              if (statusEl) statusEl.textContent = 'Scan error: ' + msg.message;
               break;
             }
             case 'setServerUrl': {
@@ -2582,8 +3367,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           graphState.nodes = {};
           graphState.edges = result.edges || [];
 
-          // Center target at (0, 0)
-          createNodeElement(result.target, 0, 0, 'root-node');
+          // Center target at (0, 0), marked tainted-node in red if isTainted
+          const targetExtra = result.isTainted ? 'root-node tainted-node' : 'root-node';
+          createNodeElement(result.target, 0, 0, targetExtra);
 
           (result.levels || []).forEach(lvl => {
             const nodes = lvl.nodes || [];
@@ -2639,6 +3425,306 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
           drawEdges();
           resetGraphCamera();
+        }
+
+        // Vulnerability Scanner Client Logic
+        let activeScanFindings = [];
+        let activeSeverityFilter = 'all';
+        let allScanLogs = [];
+        let logFilterWarningsOnly = false;
+
+        function appendVulLog(log) {
+          if (!log) return;
+          allScanLogs.push(log);
+
+          const badgeEl = document.getElementById('vul-logs-count-badge');
+          if (badgeEl) badgeEl.textContent = allScanLogs.length + ' logs';
+
+          const terminalEl = document.getElementById('vul-logs-terminal');
+          if (!terminalEl) return;
+
+          const placeholder = terminalEl.querySelector('.log-placeholder');
+          if (placeholder) placeholder.remove();
+
+          if (logFilterWarningsOnly && log.level !== 'warn' && log.level !== 'error') {
+            return;
+          }
+
+          const row = document.createElement('div');
+          row.className = 'log-entry';
+
+          const engineSlug = (log.engine || 'scan').toLowerCase().replace(/[^a-z0-9]/g, '-');
+          const levelClass = 'level-' + (log.level || 'info');
+
+          row.innerHTML = 
+            '<span class="log-time">' + escapeClientHtml(log.timestamp || '') + '</span>' +
+            '<span class="log-engine-badge badge-engine-' + engineSlug + '">[' + escapeClientHtml(log.engine || 'INFO') + ']</span>' +
+            '<span class="log-msg ' + levelClass + '">' + escapeClientHtml(log.message) + (log.detail ? ' <span style="opacity: 0.8; font-size: 9px;">(' + escapeClientHtml(log.detail) + ')</span>' : '') + '</span>';
+
+          terminalEl.appendChild(row);
+          terminalEl.scrollTop = terminalEl.scrollHeight;
+        }
+
+        function renderAllLogs() {
+          const terminalEl = document.getElementById('vul-logs-terminal');
+          if (!terminalEl) return;
+          terminalEl.innerHTML = '';
+
+          const badgeEl = document.getElementById('vul-logs-count-badge');
+          if (badgeEl) badgeEl.textContent = allScanLogs.length + ' logs';
+
+          if (allScanLogs.length === 0) {
+            terminalEl.innerHTML = '<div class="log-placeholder" style="color: var(--text-muted); font-size: 10px; font-family: monospace; padding: 6px;">[SYSTEM] Ready. Click \\'Scan Entire Project\\' to start multi-engine security analysis. Execution logs from all 4 tools will stream here in real-time.</div>';
+            return;
+          }
+
+          const logsToRender = logFilterWarningsOnly
+            ? allScanLogs.filter(l => l.level === 'warn' || l.level === 'error')
+            : allScanLogs;
+
+          if (logsToRender.length === 0) {
+            terminalEl.innerHTML = '<div style="color: var(--text-muted); font-size: 10px; font-family: monospace; padding: 6px;">No warnings or findings in logs.</div>';
+            return;
+          }
+
+          logsToRender.forEach(log => {
+            const row = document.createElement('div');
+            row.className = 'log-entry';
+            const engineSlug = (log.engine || 'scan').toLowerCase().replace(/[^a-z0-9]/g, '-');
+            const levelClass = 'level-' + (log.level || 'info');
+
+            row.innerHTML = 
+              '<span class="log-time">' + escapeClientHtml(log.timestamp || '') + '</span>' +
+              '<span class="log-engine-badge badge-engine-' + engineSlug + '">[' + escapeClientHtml(log.engine || 'INFO') + ']</span>' +
+              '<span class="log-msg ' + levelClass + '">' + escapeClientHtml(log.message) + (log.detail ? ' <span style="opacity: 0.8; font-size: 9px;">(' + escapeClientHtml(log.detail) + ')</span>' : '') + '</span>';
+            terminalEl.appendChild(row);
+          });
+          terminalEl.scrollTop = terminalEl.scrollHeight;
+        }
+
+        function updateToolSummaryChips(summary) {
+          if (!summary) return;
+
+          const statSast = document.getElementById('stat-sast');
+          if (statSast && summary.engine1Sast) {
+            statSast.textContent = summary.engine1Sast.findingsCount + ' findings (' + summary.engine1Sast.filesScanned + ' files)';
+            statSast.className = 'tool-chip-stat' + (summary.engine1Sast.findingsCount > 0 ? ' has-findings' : '');
+          }
+
+          const statSecrets = document.getElementById('stat-secrets');
+          if (statSecrets && summary.engine2Secrets) {
+            statSecrets.textContent = summary.engine2Secrets.findingsCount + ' leaks (' + summary.engine2Secrets.filesScanned + ' files)';
+            statSecrets.className = 'tool-chip-stat' + (summary.engine2Secrets.findingsCount > 0 ? ' has-findings' : '');
+          }
+
+          const statAtlas = document.getElementById('stat-atlas');
+          if (statAtlas && summary.engine3AtlasAst) {
+            statAtlas.textContent = summary.engine3AtlasAst.findingsCount + ' risks (' + summary.engine3AtlasAst.symbolsEvaluated + ' symbols)';
+            statAtlas.className = 'tool-chip-stat' + (summary.engine3AtlasAst.findingsCount > 0 ? ' has-findings' : '');
+          }
+
+          const statManifest = document.getElementById('stat-manifest');
+          if (statManifest && summary.engine4Manifest) {
+            statManifest.textContent = summary.engine4Manifest.findingsCount + ' advisories (' + (summary.engine4Manifest.manifestsChecked || []).length + ' manifests)';
+            statManifest.className = 'tool-chip-stat' + (summary.engine4Manifest.findingsCount > 0 ? ' has-findings' : '');
+          }
+        }
+
+        document.getElementById('btn-toggle-vul-logs')?.addEventListener('click', () => {
+          const terminal = document.getElementById('vul-logs-terminal');
+          const icon = document.getElementById('vul-logs-toggle-icon');
+          if (!terminal) return;
+          const isHidden = terminal.style.display === 'none';
+          terminal.style.display = isHidden ? 'flex' : 'none';
+          if (icon) icon.textContent = isHidden ? '▼' : '►';
+        });
+
+        document.getElementById('btn-filter-log-findings')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          logFilterWarningsOnly = !logFilterWarningsOnly;
+          const btn = document.getElementById('btn-filter-log-findings');
+          if (btn) btn.classList.toggle('active', logFilterWarningsOnly);
+          renderAllLogs();
+        });
+
+        document.getElementById('btn-show-output-channel')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          vscode.postMessage({ command: 'showOutputChannel' });
+        });
+
+        document.getElementById('btn-clear-vul-logs')?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          allScanLogs = [];
+          renderAllLogs();
+        });
+
+        document.getElementById('btn-start-vul-scan')?.addEventListener('click', () => {
+          allScanLogs = [];
+          const terminalEl = document.getElementById('vul-logs-terminal');
+          if (terminalEl) {
+            terminalEl.style.display = 'flex';
+            terminalEl.innerHTML = '';
+          }
+          const icon = document.getElementById('vul-logs-toggle-icon');
+          if (icon) icon.textContent = '▼';
+          appendVulLog({
+            timestamp: new Date().toLocaleTimeString(),
+            engine: 'PRE-FILTER',
+            level: 'info',
+            message: 'Starting full-project vulnerability scan with 4 consensus engines...'
+          });
+
+          const statusEl = document.getElementById('vul-scan-status');
+          if (statusEl) statusEl.textContent = 'Initiating multi-engine vulnerability scan...';
+          const containerEl = document.getElementById('vul-progress-container');
+          if (containerEl) containerEl.style.display = 'block';
+          const barEl = document.getElementById('vul-progress-bar');
+          if (barEl) barEl.style.width = '5%';
+          vscode.postMessage({ command: 'startVulnerabilityScan' });
+        });
+
+        // Live Search Filter
+        document.getElementById('vul-search-input')?.addEventListener('input', (e) => {
+          applyVulFilters();
+        });
+
+        // Severity Pills Filter & Summary Pills Click
+        function setSeverityFilter(sev) {
+          activeSeverityFilter = sev;
+          document.querySelectorAll('#vul-severity-filters .pill-btn').forEach(b => {
+            b.classList.toggle('active', b.dataset.sev === sev);
+          });
+          document.querySelectorAll('#vul-metrics-row .vul-pill').forEach(b => {
+            b.classList.toggle('active', b.dataset.sev === sev);
+          });
+          applyVulFilters();
+        }
+
+        document.querySelectorAll('#vul-severity-filters .pill-btn').forEach(btn => {
+          btn.addEventListener('click', () => {
+            setSeverityFilter(btn.dataset.sev || 'all');
+          });
+        });
+
+        document.querySelectorAll('#vul-metrics-row .vul-pill').forEach(pill => {
+          pill.addEventListener('click', () => {
+            setSeverityFilter(pill.dataset.sev || 'all');
+          });
+        });
+
+        function handleVulScanComplete(result) {
+          activeScanFindings = result.findings || [];
+          const s = result.summary || { total: 0, critical: 0, high: 0, medium: 0, low: 0 };
+          
+          if (result.toolExecutionSummary) {
+            updateToolSummaryChips(result.toolExecutionSummary);
+          }
+
+          if (result.logs && result.logs.length > 0) {
+            allScanLogs = result.logs;
+            renderAllLogs();
+          }
+
+          const dotEl = document.getElementById('vul-status-dot');
+          if (dotEl) {
+            dotEl.style.background = s.critical > 0 ? '#ef4444' : s.high > 0 ? '#f97316' : '#34d399';
+            dotEl.style.boxShadow = s.critical > 0 ? '0 0 8px rgba(239, 68, 68, 0.7)' : '0 0 6px rgba(52, 211, 153, 0.6)';
+          }
+
+          const totEl = document.getElementById('metric-vul-total');
+          const critEl = document.getElementById('metric-vul-critical');
+          const highEl = document.getElementById('metric-vul-high');
+          const medEl = document.getElementById('metric-vul-medium');
+          const lowEl = document.getElementById('metric-vul-low');
+          const badgeEl = document.getElementById('vul-badge-count');
+
+          if (totEl) totEl.textContent = 'Total: ' + s.total;
+          if (critEl) critEl.textContent = 'Critical: ' + s.critical;
+          if (highEl) highEl.textContent = 'High: ' + s.high;
+          if (medEl) medEl.textContent = 'Medium: ' + s.medium;
+          if (lowEl) lowEl.textContent = 'Low: ' + s.low;
+
+          if (badgeEl) {
+            badgeEl.textContent = s.total;
+            badgeEl.style.display = s.total > 0 ? 'inline-block' : 'none';
+          }
+
+          applyVulFilters();
+        }
+
+        function applyVulFilters() {
+          const query = (document.getElementById('vul-search-input')?.value || '').toLowerCase().trim();
+          const filtered = activeScanFindings.filter(f => {
+            if (activeSeverityFilter !== 'all' && f.severity !== activeSeverityFilter) return false;
+            if (query) {
+              const str = (f.title + ' ' + f.filePath + ' ' + f.cwe + ' ' + f.description).toLowerCase();
+              if (!str.includes(query)) return false;
+            }
+            return true;
+          });
+          renderVulCards(filtered);
+        }
+
+        function renderVulCards(findings) {
+          const listEl = document.getElementById('vul-findings-list');
+          if (!listEl) return;
+          listEl.innerHTML = '';
+
+          if (findings.length === 0) {
+            listEl.innerHTML = '<div style="text-align: center; padding: 32px 10px; color: var(--text-muted); font-size: 11px;">No matching vulnerabilities found.</div>';
+            return;
+          }
+
+          findings.forEach(f => {
+            const card = document.createElement('div');
+            const sevClass = 'sev-' + f.severity.toLowerCase();
+            card.className = 'vul-card ' + sevClass + '-border';
+
+            const toolsHtml = (f.tools || []).map(t => '<span class="vul-badge tools-badge">' + escapeClientHtml(t) + '</span>').join(' ');
+
+            card.innerHTML = 
+              '<div class="vul-badge-row">' +
+                '<span class="vul-badge ' + sevClass + '">' + escapeClientHtml(f.severity) + '</span>' +
+                '<span class="vul-badge cwe-badge">' + escapeClientHtml(f.cwe) + '</span>' +
+                toolsHtml +
+              '</div>' +
+              '<div class="vul-title">' + escapeClientHtml(f.title) + '</div>' +
+              '<div class="vul-loc">📄 ' + escapeClientHtml(f.filePath) + ':' + f.line + '</div>' +
+              (f.snippet ? '<div class="vul-code-snippet">' + escapeClientHtml(f.snippet) + '</div>' : '') +
+              '<div class="vul-desc">' + escapeClientHtml(f.description) + '</div>' +
+              (f.remediation ? '<div class="vul-remediation"><strong>Fix:</strong> ' + escapeClientHtml(f.remediation) + '</div>' : '') +
+              '<div class="vul-card-footer">' +
+                '<span class="vul-dblclick-hint">💡 Double-click card to jump to line</span>' +
+                '<button class="btn-trace-vul" title="Trace blast radius and view contaminated flow in Code Graph">' +
+                  '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+                    '<circle cx="12" cy="12" r="10"></circle>' +
+                    '<line x1="22" y1="12" x2="18" y2="12"></line>' +
+                    '<line x1="6" y1="12" x2="2" y2="12"></line>' +
+                    '<line x1="12" y1="6" x2="12" y2="2"></line>' +
+                    '<line x1="12" y1="22" x2="12" y2="18"></line>' +
+                  '</svg>' +
+                  '<span>View Blast Radius &amp; Flow</span>' +
+                '</button>' +
+              '</div>';
+
+            // Double-click jumps to code in editor
+            card.addEventListener('dblclick', (e) => {
+              vscode.postMessage({ command: 'openInEditor', path: f.filePath, line: f.line });
+            });
+
+            // Button jumps to Code Graph blast radius and marks bug node in red
+            card.querySelector('.btn-trace-vul')?.addEventListener('click', (e) => {
+              e.stopPropagation();
+              vscode.postMessage({
+                command: 'traceVulnerabilityGraph',
+                symbolName: f.symbolName,
+                filePath: f.filePath,
+                line: f.line
+              });
+            });
+
+            listEl.appendChild(card);
+          });
         }
 
         // Auto-request graph when Tab 2 is opened

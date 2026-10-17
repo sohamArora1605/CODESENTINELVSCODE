@@ -4,35 +4,26 @@
     "codesentinel": {
       "type": "local",
       "command": [
-        "docker",
-        "run",
-        "-i",
-        "--rm",
-        "-v",
-        "d:/CODESENTINELVSCODE:/workspace:ro",
-        "-e",
-        "CODESENTINEL_WORKSPACE=/workspace",
-        "codesentinel/core:latest"
+        "node",
+        "d:/CODESENTINELVSCODE/dist/mcp-server.js"
       ],
-      "enabled": true
+      "enabled": true,
+      "environment": {
+        "CODESENTINEL_WORKSPACE": "D:/CODESENTINELVSCODE"
+      }
     },
     "atlas": {
       "type": "local",
       "command": [
-        "docker",
-        "run",
-        "-i",
-        "--rm",
-        "--entrypoint",
-        "atlas",
-        "-v",
-        "d:/CODESENTINELVSCODE:/workspace",
-        "-w",
-        "/workspace",
-        "codesentinel/core:latest",
-        "mcp"
+        "node",
+        "d:/CODESENTINELVSCODE/dist/atlas-bridge.js",
+        "local",
+        "d:/CODESENTINELVSCODE"
       ],
-      "enabled": true
+      "enabled": true,
+      "environment": {
+        "CODESENTINEL_WORKSPACE": "D:/CODESENTINELVSCODE"
+      }
     }
   }
 }

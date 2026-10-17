@@ -93,6 +93,46 @@ export interface FileDependenciesResult {
   cycles: string[][];
 }
 
+export interface FlowStep {
+  step: number;
+  name: string;
+  kind: string;
+  path: string;
+  startLine: number;
+  endLine: number;
+  role: string;
+  description: string;
+  snippet?: string;
+}
+
+export interface FlowExplainerResult {
+  topic: string;
+  summary: string;
+  entryPoint?: string;
+  steps: FlowStep[];
+  mermaidDiagram: string;
+  graph: {
+    nodes: Array<{
+      id: string;
+      name: string;
+      kind: string;
+      path: string;
+      startLine: number;
+      endLine: number;
+      role: string;
+      description: string;
+      step: number;
+    }>;
+    edges: Array<{
+      id: string;
+      source: string;
+      target: string;
+      label?: string;
+      kind: string;
+    }>;
+  };
+}
+
 export class GraphService {
   private static instance: GraphService;
 
@@ -110,13 +150,32 @@ export class GraphService {
   }
 
   public isGraphAvailable(workspaceRoot: string): boolean {
-    return fs.existsSync(this.getDbPath(workspaceRoot));
+    const dbPath = this.getDbPath(workspaceRoot);
+    if (!fs.existsSync(dbPath)) return false;
+    try {
+      const stats = fs.statSync(dbPath);
+      if (stats.size < 100) return false;
+      const fd = fs.openSync(dbPath, "r");
+      const buf = Buffer.alloc(16);
+      fs.readSync(fd, buf, 0, 16, 0);
+      fs.closeSync(fd);
+      return buf.toString("utf8").startsWith("SQLite format 3");
+    } catch {
+      return false;
+    }
   }
 
   private getDatabase(workspaceRoot: string): any {
     const dbPath = this.getDbPath(workspaceRoot);
     if (!fs.existsSync(dbPath)) {
       throw new Error(`Atlas database not found at ${dbPath}. Please index the repository first.`);
+    }
+
+    if (!this.isGraphAvailable(workspaceRoot)) {
+      try {
+        fs.unlinkSync(dbPath);
+      } catch {}
+      throw new Error(`Atlas database file was corrupted or incomplete. Damaged file removed. Please click 'Index Code Graph' to re-index.`);
     }
 
     try {
@@ -130,7 +189,7 @@ export class GraphService {
 
   public getStats(workspaceRoot: string): GraphStats {
     const dbPath = this.getDbPath(workspaceRoot);
-    if (!fs.existsSync(dbPath)) {
+    if (!this.isGraphAvailable(workspaceRoot)) {
       return { available: false, symbolCount: 0, edgeCount: 0, fileCount: 0, dbPath };
     }
 
@@ -152,6 +211,9 @@ export class GraphService {
     category: "callables" | "types" | "data" | "containers" | "all" | "files" = "callables",
     fileFilter?: string
   ): GraphSymbol[] {
+    if (!this.isGraphAvailable(workspaceRoot)) {
+      return [];
+    }
     const db = this.getDatabase(workspaceRoot);
     if (category === "files") {
       const sql = `
@@ -786,6 +848,207 @@ export class GraphService {
       return lines.slice(start, end).join("\n");
     } catch {
       return "// Could not read source content";
+    }
+  }
+
+  public saveFlowDiagram(workspaceRoot: string, flow: FlowExplainerResult): string {
+    const atlasDir = path.join(workspaceRoot, ".atlas");
+    if (!fs.existsSync(atlasDir)) {
+      try {
+        fs.mkdirSync(atlasDir, { recursive: true });
+      } catch {}
+    }
+    const flowPath = path.join(atlasDir, "flow.json");
+    try {
+      fs.writeFileSync(flowPath, JSON.stringify(flow, null, 2), "utf-8");
+    } catch {}
+    return flowPath;
+  }
+
+  public getSavedFlowDiagram(workspaceRoot: string): FlowExplainerResult | null {
+    const flowPath = path.join(workspaceRoot, ".atlas", "flow.json");
+    if (fs.existsSync(flowPath)) {
+      try {
+        return JSON.parse(fs.readFileSync(flowPath, "utf-8"));
+      } catch {}
+    }
+    return null;
+  }
+
+  public explainFlow(
+    workspaceRoot: string,
+    topic: string,
+    entrySymbol?: string,
+    maxSteps: number = 8
+  ): FlowExplainerResult {
+    if (!this.isGraphAvailable(workspaceRoot)) {
+      return {
+        topic,
+        summary: `Workspace index is not ready yet. Please click 'Index Code Graph' in the toolbar to index your repository.`,
+        steps: [],
+        mermaidDiagram: "flowchart TD\n  Start[Workspace Not Indexed - Click Index Code Graph]",
+        graph: { nodes: [], edges: [] },
+      };
+    }
+
+    try {
+      const query = (entrySymbol || topic || "").trim();
+      let candidates = this.searchSymbols(workspaceRoot, query, 10, "callables");
+
+    if (candidates.length === 0 && topic) {
+      // Related fallbacks for common architecture topics
+      const keywords = topic.toLowerCase().includes("login") || topic.toLowerCase().includes("auth")
+        ? ["auth", "login", "signin", "verify", "session", "user", "token"]
+        : [topic];
+      for (const kw of keywords) {
+        candidates = this.searchSymbols(workspaceRoot, kw, 8, "callables");
+        if (candidates.length > 0) break;
+      }
+    }
+
+    if (candidates.length === 0) {
+      candidates = this.getTopSymbols(workspaceRoot, 5);
+    }
+
+    const startSym = candidates[0];
+    if (!startSym) {
+      const emptyResult: FlowExplainerResult = {
+        topic,
+        summary: `No callable symbols found in workspace index for topic "${topic}". Please ensure the codebase has been indexed.`,
+        steps: [],
+        mermaidDiagram: "flowchart TD\n  Start[No matching symbols indexed]",
+        graph: { nodes: [], edges: [] },
+      };
+      return emptyResult;
+    }
+
+    // Trace call hierarchy
+    const hierarchy = this.getCallHierarchy(workspaceRoot, startSym.name, {
+      maxCallers: 3,
+      maxCallees: Math.max(4, maxSteps - 2),
+    });
+
+    const orderedSymbols: Array<{ sym: GraphSymbol; role: string; desc: string }> = [];
+
+    // Helper for determining role and semantic description
+    const classifyRole = (sym: GraphSymbol, isRoot: boolean): { role: string; desc: string } => {
+      const n = (sym.name + " " + sym.path).toLowerCase();
+      if (n.includes("route") || n.includes("handler") || n.includes("controller") || n.includes("endpoint") || n.includes("page")) {
+        return { role: "entrypoint", desc: `Receives client request and parses parameters in ${path.basename(sym.path)}` };
+      }
+      if (n.includes("validate") || n.includes("check") || n.includes("schema") || n.includes("sanitize") || n.includes("zod")) {
+        return { role: "validator", desc: `Validates input payload data integrity and invariants` };
+      }
+      if (n.includes("auth") || n.includes("login") || n.includes("verify") || n.includes("password") || n.includes("hash")) {
+        return { role: "auth_service", desc: `Authenticates credentials and verifies identity rules` };
+      }
+      if (n.includes("user") || n.includes("find") || n.includes("query") || n.includes("db") || n.includes("model") || n.includes("repo") || n.includes("prisma")) {
+        return { role: "database", desc: `Executes database queries and fetches entity records` };
+      }
+      if (n.includes("token") || n.includes("jwt") || n.includes("session") || n.includes("cookie") || n.includes("sign")) {
+        return { role: "session_token", desc: `Generates secure authentication tokens or session state` };
+      }
+      return { role: isRoot ? "service" : "internal_operation", desc: `Executes core domain logic for ${sym.name}` };
+    };
+
+    // 1. Prepend relevant caller (if any) as entrypoint
+    if (hierarchy.callers.length > 0) {
+      const caller = hierarchy.callers[0];
+      const cls = classifyRole(caller, false);
+      orderedSymbols.push({ sym: caller, role: "entrypoint", desc: cls.desc });
+    }
+
+    // 2. Add root symbol
+    const rootCls = classifyRole(hierarchy.root, true);
+    orderedSymbols.push({ sym: hierarchy.root, role: rootCls.role, desc: rootCls.desc });
+
+    // 3. Append callees up to maxSteps
+    for (const callee of hierarchy.callees) {
+      if (orderedSymbols.length >= maxSteps) break;
+      if (!orderedSymbols.some(s => s.sym.name === callee.name)) {
+        const cls = classifyRole(callee, false);
+        orderedSymbols.push({ sym: callee, role: cls.role, desc: cls.desc });
+      }
+    }
+
+    // Construct flow steps
+    const steps: FlowStep[] = orderedSymbols.map((item, idx) => {
+      const s = item.sym;
+      const snippet = this.getCodeSnippet(workspaceRoot, s.path, s.startLine, s.startLine + 6);
+      return {
+        step: idx + 1,
+        name: s.name,
+        kind: s.kind,
+        path: s.path,
+        startLine: s.startLine,
+        endLine: s.endLine,
+        role: item.role,
+        description: item.desc,
+        snippet,
+      };
+    });
+
+    // Construct Mermaid diagram
+    const mermaidLines = ["flowchart TD"];
+    steps.forEach((st) => {
+      const cleanName = st.name.replace(/[^a-zA-Z0-9_]/g, "_");
+      const label = `"${st.step}. ${st.name} (${st.role})"`;
+      mermaidLines.push(`  ${cleanName}[${label}]`);
+    });
+    for (let i = 0; i < steps.length - 1; i++) {
+      const src = steps[i].name.replace(/[^a-zA-Z0-9_]/g, "_");
+      const tgt = steps[i + 1].name.replace(/[^a-zA-Z0-9_]/g, "_");
+      mermaidLines.push(`  ${src} -->|executes| ${tgt}`);
+    }
+    const mermaidDiagram = mermaidLines.join("\n");
+
+    // Construct visual graph for Code Graph tab
+    const graphNodes = steps.map((st) => ({
+      id: st.name,
+      name: st.name,
+      kind: st.kind,
+      path: st.path,
+      startLine: st.startLine,
+      endLine: st.endLine,
+      role: st.role,
+      description: st.description,
+      step: st.step,
+    }));
+
+    const graphEdges: Array<{ id: string; source: string; target: string; label?: string; kind: string }> = [];
+    for (let i = 0; i < steps.length - 1; i++) {
+      graphEdges.push({
+        id: `flow_${steps[i].name}_${steps[i + 1].name}`,
+        source: steps[i].name,
+        target: steps[i + 1].name,
+        label: `step ${i + 1} -> ${i + 2}`,
+        kind: "flow",
+      });
+    }
+
+    const summary = `Flow analysis for "${topic}": Traced ${steps.length} sequential execution stages from entrypoint "${steps[0]?.name}" through "${steps[steps.length - 1]?.name}".`;
+
+    const result: FlowExplainerResult = {
+      topic,
+      summary,
+      entryPoint: steps[0]?.name,
+      steps,
+      mermaidDiagram,
+      graph: { nodes: graphNodes, edges: graphEdges },
+    };
+
+    // Save diagram for the Code Graph tab
+    this.saveFlowDiagram(workspaceRoot, result);
+
+    return result;
+    } catch (err: any) {
+      return {
+        topic,
+        summary: `Unable to trace flow for "${topic}": ${err.message}. Please re-index your workspace.`,
+        steps: [],
+        mermaidDiagram: "flowchart TD\n  Err[Analysis Error - Reindex Workspace]",
+        graph: { nodes: [], edges: [] },
+      };
     }
   }
 

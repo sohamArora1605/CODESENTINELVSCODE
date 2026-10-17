@@ -54,7 +54,7 @@
       },
       {
         "command": "codesentinel.toggleBackendMode",
-        "title": "CodeSentinel: Switch Backend Mode (Docker / Cloud)",
+        "title": "CodeSentinel: Switch Backend Mode (Local / Cloud)",
         "category": "CodeSentinel"
       },
       {
@@ -70,6 +70,21 @@
       {
         "command": "codesentinel.indexAtlas",
         "title": "CodeSentinel: Index Codebase with Atlas Code Graph",
+        "category": "CodeSentinel"
+      },
+      {
+        "command": "codesentinel.installDependencies",
+        "title": "CodeSentinel: Check and Install Host Dependencies (OpenCode & Atlas)",
+        "category": "CodeSentinel"
+      },
+      {
+        "command": "codesentinel.runCloudSecurityAudit",
+        "title": "CodeSentinel: Run Cloud Security Audit with OpenCode",
+        "category": "CodeSentinel"
+      },
+      {
+        "command": "codesentinel.provisionSkills",
+        "title": "CodeSentinel: Provision Security Audit Skills to OpenCode",
         "category": "CodeSentinel"
       }
     ],
@@ -97,11 +112,11 @@
         "codesentinel.backendMode": {
           "type": "string",
           "enum": [
-            "local-docker",
+            "local",
             "cloud"
           ],
-          "default": "local-docker",
-          "description": "Backend execution mode: local hermetic Docker container or remote cloud endpoint."
+          "default": "local",
+          "description": "Backend execution mode: local self-contained runtime or remote cloud endpoint."
         },
         "codesentinel.dockerImage": {
           "type": "string",
@@ -122,6 +137,11 @@
           "type": "boolean",
           "default": false,
           "description": "Automatically open OpenCode session when a workspace repository is loaded."
+        },
+        "codesentinel.autoProvisionCloudSecurityAuditSkill": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically provision the Cloud Security Audit skill to OpenCode (.opencode/skills/cloud-security-audit) upon workspace load."
         }
       }
     }

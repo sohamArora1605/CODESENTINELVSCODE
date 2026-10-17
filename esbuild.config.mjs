@@ -38,10 +38,26 @@ async function build() {
     logLevel: "info",
   });
 
+  // 3. Atlas MCP stdio bridge (translates Windows host paths <-> /workspace for Docker)
+  const atlasBridgeCtx = await esbuild.context({
+    entryPoints: ["src/mcp/atlasBridge.ts"],
+    bundle: true,
+    format: "cjs",
+    minify: shouldMinify,
+    sourcemap: true,
+    sourcesContent: false,
+    platform: "node",
+    outfile: "dist/atlas-bridge.js",
+    external: ["vscode"],
+    logLevel: "info",
+  });
+
   await extensionCtx.rebuild();
   await mcpServerCtx.rebuild();
+  await atlasBridgeCtx.rebuild();
+  await atlasBridgeCtx.dispose();
 
-  // 3. Optional Test Runner bundle
+  // 4. Optional Test Runner bundle
   if (fs.existsSync("test/runner.ts")) {
     const testCtx = await esbuild.context({
       entryPoints: ["test/runner.ts"],
