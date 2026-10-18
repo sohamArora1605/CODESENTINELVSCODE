@@ -52,55 +52,129 @@ export class SecurityToolManager {
   }
 
   /**
-   * Helper to download remote file with redirect following.
+   * Helper to download remote file with redirect following, timeout, and live progress logging.
    */
-  private downloadFile(url: string, destPath: string): Promise<void> {
+  private downloadFile(url: string, destPath: string, toolLabel?: string, onLog?: (msg: string) => void): Promise<void> {
+    const tmpPath = `${destPath}.tmp_${Date.now()}`;
     return new Promise((resolve, reject) => {
-      const follow = (curUrl: string) => {
-        https
-          .get(curUrl, { headers: { "User-Agent": "CodeSentinel-VSCode" } }, (res) => {
+      let settled = false;
+      const cleanupAndReject = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch {}
+        reject(err);
+      };
+
+      const follow = (curUrl: string, redirectCount: number = 0) => {
+        if (redirectCount > 8) {
+          cleanupAndReject(new Error(`Too many redirects downloading ${url}`));
+          return;
+        }
+
+        const req = https.get(
+          curUrl,
+          {
+            headers: {
+              "User-Agent": "CodeSentinel-VSCode-Security-Scanner",
+              "Accept": "*/*",
+            },
+            timeout: 45000,
+          },
+          (res) => {
             if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-              follow(res.headers.location);
+              follow(res.headers.location, redirectCount + 1);
               return;
             }
             if (res.statusCode !== 200) {
-              reject(new Error(`HTTP status ${res.statusCode} downloading ${curUrl}`));
+              cleanupAndReject(new Error(`HTTP status ${res.statusCode} downloading ${curUrl}`));
               return;
             }
-            const fileStream = fs.createWriteStream(destPath);
+
+            const totalBytes = parseInt(res.headers["content-length"] || "0", 10);
+            let downloadedBytes = 0;
+            let lastReportPct = -1;
+            let lastReportTime = Date.now();
+
+            const fileStream = fs.createWriteStream(tmpPath);
+
+            res.on("data", (chunk: Buffer) => {
+              downloadedBytes += chunk.length;
+              const now = Date.now();
+              if (totalBytes > 0 && onLog && (now - lastReportTime > 900)) {
+                lastReportTime = now;
+                const pct = Math.round((downloadedBytes / totalBytes) * 100);
+                if (pct !== lastReportPct) {
+                  lastReportPct = pct;
+                  const dlMb = (downloadedBytes / (1024 * 1024)).toFixed(1);
+                  const totMb = (totalBytes / (1024 * 1024)).toFixed(1);
+                  onLog(`Downloading ${toolLabel || "tool"}: ${pct}% (${dlMb}MB / ${totMb}MB)...`);
+                }
+              }
+            });
+
             res.pipe(fileStream);
+
             fileStream.on("finish", () => {
-              fileStream.close(() => resolve());
+              fileStream.close(() => {
+                if (settled) return;
+                try {
+                  if (fs.existsSync(destPath)) {
+                    try { fs.unlinkSync(destPath); } catch {}
+                  }
+                  fs.renameSync(tmpPath, destPath);
+                  settled = true;
+                  if (onLog) {
+                    onLog(`Download complete for ${toolLabel || path.basename(destPath)}.`);
+                  }
+                  resolve();
+                } catch (renameErr: any) {
+                  cleanupAndReject(renameErr);
+                }
+              });
             });
+
             fileStream.on("error", (err) => {
-              fs.unlink(destPath, () => {});
-              reject(err);
+              cleanupAndReject(err);
             });
-          })
-          .on("error", (err) => {
-            fs.unlink(destPath, () => {});
-            reject(err);
-          });
+          }
+        );
+
+        req.on("timeout", () => {
+          req.destroy();
+          cleanupAndReject(new Error(`Network timeout downloading ${curUrl}`));
+        });
+
+        req.on("error", (err) => {
+          cleanupAndReject(err);
+        });
       };
+
       follow(url);
     });
   }
 
   /**
-   * Unpack a zip or tar archive into a destination directory.
+   * Unpack a zip or tar archive into a destination directory with native tar and strict timeout.
    */
   private async unpackArchive(archivePath: string, destDir: string): Promise<void> {
     fs.mkdirSync(destDir, { recursive: true });
     if (archivePath.endsWith(".zip")) {
       if (process.platform === "win32") {
-        await execAsync(
-          `powershell -NoProfile -Command "Expand-Archive -Path '${archivePath}' -DestinationPath '${destDir}' -Force"`
-        );
+        try {
+          // Native Windows tar (present in Windows 10 build 17063+ and Windows 11) - fast & zero powershell overhead
+          await execAsync(`tar -xf "${archivePath}" -C "${destDir}"`, { timeout: 15000 });
+        } catch {
+          // Fallback to powershell with non-interactive flag and strict 30s timeout
+          await execAsync(
+            `powershell -NoProfile -NonInteractive -Command "Expand-Archive -Path '${archivePath}' -DestinationPath '${destDir}' -Force"`,
+            { timeout: 30000 }
+          );
+        }
       } else {
-        await execAsync(`unzip -o "${archivePath}" -d "${destDir}"`);
+        await execAsync(`unzip -o "${archivePath}" -d "${destDir}"`, { timeout: 30000 });
       }
     } else if (archivePath.endsWith(".tar.gz") || archivePath.endsWith(".tgz")) {
-      await execAsync(`tar -xzf "${archivePath}" -C "${destDir}"`);
+      await execAsync(`tar -xzf "${archivePath}" -C "${destDir}"`, { timeout: 30000 });
     }
     try {
       fs.unlinkSync(archivePath);
@@ -424,21 +498,28 @@ ${pathLines}
     }
 
     const binDir = this.getBinDir();
-    const tomlPath = path.join(binDir, `gitleaks_cfg_${Date.now()}.toml`);
     const reportPath = path.join(binDir, `gitleaks_report_${Date.now()}.json`);
+    const tomlPath = path.join(binDir, `gitleaks_config_${Date.now()}.toml`);
 
     try {
-      // Build TOML allowlist from gitignore rules + hardcoded exclusions
-      const tomlContent = this.buildGitleaksToml(gitignoreRules || []);
-      fs.writeFileSync(tomlPath, tomlContent, "utf-8");
+      onLog(`Running Gitleaks bulk directory scan with full built-in detection ruleset...`);
 
-      onLog(`Running Gitleaks bulk directory scan on workspace (TOML allowlist bakes ${(gitignoreRules || []).length} gitignore rules + standard exclusions; skipping all ignored paths natively)...`);
+      // Write a TOML config that EXTENDS the default ruleset (keeping all 150+ rules)
+      // while adding path exclusions for node_modules, .git, dist, etc.
+      // Without this, gitleaks scans ALL files including node_modules and hangs.
+      const tomlContent = `[extend]
+  useDefault = true
 
-      // Single directory scan — Gitleaks traverses the tree itself, allowlist handles exclusions
-      const cmd = `"${gitleaksCmd}" detect --no-git --source="${workspaceRoot}" --config="${tomlPath}" -f json -r "${reportPath}" --exit-code 0 --no-banner`;
+` + this.buildGitleaksToml(gitignoreRules || []);
+      try {
+        fs.writeFileSync(tomlPath, tomlContent, "utf-8");
+      } catch {}
+
+      const configFlag = fs.existsSync(tomlPath) ? ` -c "${tomlPath}"` : "";
+      const cmd = `"${gitleaksCmd}" detect --no-git --source="${workspaceRoot}"${configFlag} -f json -r "${reportPath}" --exit-code 0 --no-banner`;
 
       try {
-        await execAsync(cmd, { cwd: workspaceRoot, maxBuffer: 25 * 1024 * 1024 });
+        await execAsync(cmd, { cwd: workspaceRoot, maxBuffer: 25 * 1024 * 1024, timeout: 60000 });
       } catch (execErr: any) {
         // Gitleaks exits with code 1 when findings are found — that's expected
         if (!execErr.stdout && !fs.existsSync(reportPath)) {
@@ -481,15 +562,30 @@ ${pathLines}
               continue;
             }
 
-            // If we have a scannable set, only include findings in those files
-            if (scannableNorm.size > 0 && !scannableNorm.has(normFull)) {
-              // Also allow findings in manifest files that are in project root
-              const bn = path.basename(normFull);
-              const manifestNames = ["package.json", "requirements.txt", "pom.xml", "go.mod", "cargo.toml"];
-              if (!manifestNames.includes(bn)) continue;
+            const relPath = path.relative(workspaceRoot, fullPath).replace(/\\/g, "/");
+
+            // Check gitignore rules
+            if (gitignoreRules && gitignoreRules.length > 0) {
+              const relNorm = relPath.toLowerCase();
+              let isIgnored = false;
+              for (const rule of gitignoreRules) {
+                const r = rule.replace(/\\/g, "/").toLowerCase().trim();
+                if (!r || r.startsWith("#")) continue;
+                if (relNorm === r || relNorm.startsWith(r + "/") || relNorm.split("/").includes(r)) {
+                  isIgnored = true;
+                  break;
+                }
+              }
+              if (isIgnored) continue;
             }
 
-            const relPath = path.relative(workspaceRoot, fullPath).replace(/\\/g, "/");
+            // If we have a scannable set, only skip files that are binary/media or excluded
+            if (scannableNorm.size > 0 && !scannableNorm.has(normFull)) {
+              const ext = path.extname(normFull).toLowerCase();
+              const nonTextExts = [".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".mp4", ".mp3", ".zip", ".tar", ".gz", ".exe", ".dll", ".so", ".bin", ".map", ".wasm"];
+              if (nonTextExts.includes(ext)) continue;
+            }
+
             const line = item.StartLine || item.startLine || 1;
             const ruleId = item.RuleID || item.ruleID || "secret-leak";
             const secretVal = item.Secret || item.secret || "";
@@ -515,8 +611,8 @@ ${pathLines}
     } catch (e: any) {
       onLog(`Gitleaks execution error: ${e.message}`);
     } finally {
-      try { if (fs.existsSync(tomlPath)) fs.unlinkSync(tomlPath); } catch {}
       try { if (fs.existsSync(reportPath)) fs.unlinkSync(reportPath); } catch {}
+      try { if (fs.existsSync(tomlPath)) fs.unlinkSync(tomlPath); } catch {}
     }
 
     onLog(`Gitleaks bulk scan complete: ${findings.length} secret(s) detected.`);
@@ -598,105 +694,7 @@ ${pathLines}
     }
 
     const binDir = this.getBinDir();
-    const rulesFile = path.join(binDir, `rules_${Date.now()}.yaml`);
     let semgrepignorePath = "";
-
-    // Standard high-signal multi-language AST security rules in Semgrep/Opengrep YAML syntax
-    const astSecurityRulesYaml = `rules:
-  - id: ast-command-injection
-    languages: [javascript, typescript, python, java, go, ruby, php, c, cpp]
-    severity: ERROR
-    message: Untrusted dynamic input forwarded into command execution sink
-    metadata:
-      cwe: CWE-78
-      category: Command Injection
-    patterns:
-      - pattern-either:
-          - pattern: exec($CMD, ...)
-          - pattern: execSync($CMD, ...)
-          - pattern: spawn($CMD, ...)
-          - pattern: child_process.exec($CMD, ...)
-          - pattern: child_process.execSync($CMD, ...)
-          - pattern: child_process.spawn($CMD, ...)
-          - pattern: os.system($CMD)
-          - pattern: os.popen($CMD)
-          - pattern: subprocess.Popen($CMD, ...)
-          - pattern: subprocess.run($CMD, ...)
-          - pattern: subprocess.call($CMD, ...)
-          - pattern: Runtime.getRuntime().exec($CMD)
-          - pattern: exec.Command($CMD, ...)
-
-  - id: ast-sql-injection
-    languages: [javascript, typescript, python, java, go, php]
-    severity: ERROR
-    message: Dynamic SQL query concatenation without parameterized binding
-    metadata:
-      cwe: CWE-89
-      category: SQL Injection
-    patterns:
-      - pattern-either:
-          - pattern: $DB.query($SQL + $INPUT, ...)
-          - pattern: $DB.execute($SQL + $INPUT, ...)
-          - pattern: $DB.rawQuery($SQL + $INPUT, ...)
-          - pattern: query($SQL + $INPUT, ...)
-          - pattern: execute($SQL + $INPUT, ...)
-          - pattern: execute($SQL % $INPUT, ...)
-
-  - id: ast-insecure-deserialization
-    languages: [python, java, javascript, typescript, ruby]
-    severity: ERROR
-    message: Insecure object deserialization of untrusted data
-    metadata:
-      cwe: CWE-502
-      category: Insecure Deserialization
-    patterns:
-      - pattern-either:
-          - pattern: pickle.loads(...)
-          - pattern: yaml.load($INPUT, ...)
-          - pattern: unserialize(...)
-
-  - id: ast-ssrf-outbound
-    languages: [javascript, typescript, python, go]
-    severity: WARNING
-    message: Direct user input in outbound HTTP request sink
-    metadata:
-      cwe: CWE-918
-      category: Server-Side Request Forgery
-    patterns:
-      - pattern-either:
-          - pattern: axios.get($URL, ...)
-          - pattern: axios.post($URL, ...)
-          - pattern: fetch($URL, ...)
-          - pattern: requests.get($URL, ...)
-          - pattern: requests.post($URL, ...)
-
-  - id: ast-path-traversal
-    languages: [javascript, typescript, python, java, go, php]
-    severity: ERROR
-    message: Unsanitized user input used in file system path
-    metadata:
-      cwe: CWE-22
-      category: Path Traversal
-    patterns:
-      - pattern-either:
-          - pattern: fs.readFile($PATH, ...)
-          - pattern: fs.readFileSync($PATH, ...)
-          - pattern: open($PATH, ...)
-          - pattern: filepath.Join($BASE, $INPUT)
-
-  - id: ast-xss-dangerous-sink
-    languages: [javascript, typescript]
-    severity: ERROR
-    message: Unescaped user input assigned to dangerous DOM sink
-    metadata:
-      cwe: CWE-79
-      category: Cross-Site Scripting
-    patterns:
-      - pattern-either:
-          - pattern: $EL.innerHTML = $INPUT
-          - pattern: $EL.outerHTML = $INPUT
-          - pattern: document.write($INPUT)
-`;
 
     // Build a Set for post-scan filtering
     const scannableSet = new Set(
@@ -717,8 +715,9 @@ ${pathLines}
           const rawItemPath = r.path || r.target || "";
           const fullItemPath = path.isAbsolute(rawItemPath)
             ? rawItemPath
-            : path.join(workspaceRoot, rawItemPath);
+            : path.resolve(workspaceRoot, rawItemPath);
           const normalizedFull = path.normalize(fullItemPath).toLowerCase().replace(/\\/g, "/");
+          const relNorm = path.relative(workspaceRoot, fullItemPath).toLowerCase().replace(/\\/g, "/");
 
           // Hard post-filter: never report findings in excluded dirs
           if (
@@ -728,25 +727,44 @@ ${pathLines}
             normalizedFull.includes("/dist/") ||
             normalizedFull.includes("/build/") ||
             normalizedFull.includes("/vendor/") ||
-            normalizedFull.includes("/.venv/")
+            normalizedFull.includes("/.venv/") ||
+            normalizedFull.includes("/venv/")
           ) {
             continue;
           }
 
-          // Enforce scannable files membership
-          if (scannableSet.size > 0 && !scannableSet.has(normalizedFull)) {
+          // Enforce scannable files membership (check normalized full path or relative path)
+          if (scannableSet.size > 0 && !scannableSet.has(normalizedFull) && !scannableSet.has(relNorm)) {
             continue;
           }
 
-          const checkId = r.check_id || r.rule_id || "AST-FINDING";
+          const rawCheckId = r.check_id || r.rule_id || "AST-FINDING";
+          const checkId = rawCheckId.split(".").pop() || rawCheckId;
           const filePath = path.relative(workspaceRoot, fullItemPath).replace(/\\/g, "/");
           const startLine = r.start ? (r.start.line || r.start.row || 1) : (r.line || 1);
           const endLine = r.end ? (r.end.line || r.end.row || startLine) : startLine;
           const extra = r.extra || {};
-          const cwe = (extra.metadata && extra.metadata.cwe) ? extra.metadata.cwe : "CWE-78";
-          const category = (extra.metadata && extra.metadata.category) ? extra.metadata.category : "Semantic Security";
+
+          // Robust multi-language CWE extraction from array or string
+          let cwe = "CWE-General";
+          const rawCwe = extra.metadata?.cwe;
+          if (Array.isArray(rawCwe) && rawCwe.length > 0) {
+            const m = String(rawCwe[0]).match(/CWE-\d+/i);
+            cwe = m ? m[0].toUpperCase() : String(rawCwe[0]);
+          } else if (typeof rawCwe === "string") {
+            const m = rawCwe.match(/CWE-\d+/i);
+            cwe = m ? m[0].toUpperCase() : rawCwe;
+          }
+
+          const rawCat = extra.metadata?.vulnerability_class || extra.metadata?.category;
+          const category = Array.isArray(rawCat) ? rawCat[0] : (rawCat || "AST Security");
           const sevStr = (extra.severity || "").toUpperCase();
           const severity: RawFinding["severity"] = sevStr === "ERROR" ? "Critical" : sevStr === "WARNING" ? "High" : "Medium";
+
+          const references = Array.isArray(extra.metadata?.references) ? extra.metadata.references[0] : "";
+          const remediation = references
+            ? `Review code according to security best practice. Reference: ${references}`
+            : (extra.fix || "Refactor code to sanitize untrusted input and use safe APIs.");
 
           findings.push({
             id: `OPENGREP-${checkId}-${findings.length + 1}`,
@@ -760,186 +778,141 @@ ${pathLines}
             endLine,
             snippet: (extra.lines || "").trim(),
             description: `Opengrep AST analysis detected semantic security pattern: ${checkId}. ${extra.message || ""}`,
-            remediation: "Refactor dynamic AST calls to use parameterized APIs or strict allowlists.",
+            remediation,
           });
         }
       } catch {}
     };
 
     try {
-      fs.writeFileSync(rulesFile, astSecurityRulesYaml, "utf-8");
+      // Write .semgrepignore so native engine handles traversal exclusions across all languages
+      semgrepignorePath = this.writeSemgrepignore(workspaceRoot, gitignoreRules || []);
 
-      if (!opengrepCmd.includes("opengrep-core")) {
-        // Write .semgrepignore so native engine handles traversal exclusions
-        semgrepignorePath = this.writeSemgrepignore(workspaceRoot, gitignoreRules || []);
+      onLog(`Running Opengrep AST single-pass workspace scan with all built-in security rules...`);
 
-        onLog(`Running Opengrep AST single-pass workspace scan (${scannableFiles.length} source files in scope; .semgrepignore gates native traversal)...`);
+      let scannedOk = false;
 
-        // Single directory scan — semgrepignore makes the engine skip excluded dirs natively
-        const cmd = `"${opengrepCmd}" scan --config "${rulesFile}" --quiet --json "."  `;
+      // 1. Primary: Run with --config auto which uses ALL built-in rules (secrets, injection, crypto, etc.)
+      //    This is the most comprehensive config and works offline without registry access.
+      try {
+        const cmd = `"${opengrepCmd}" scan --config auto --quiet --json "."`;
+        const { stdout } = await execAsync(cmd, { cwd: workspaceRoot, maxBuffer: 30 * 1024 * 1024, timeout: 120000 });
+        parseAndAddResults(stdout);
+        scannedOk = true;
+        onLog(`Opengrep auto-config scan complete: ${findings.length} finding(s) from built-in rules.`);
+      } catch (autoErr: any) {
+        if (autoErr.stdout && autoErr.stdout.trim().startsWith("{")) {
+          parseAndAddResults(autoErr.stdout);
+          scannedOk = true;
+          onLog(`Opengrep auto-config scan complete (with warnings): ${findings.length} finding(s).`);
+        } else {
+          onLog(`Opengrep auto-config notice: ${autoErr.message}. Trying registry rulesets...`);
+        }
+      }
+
+      // 2. Supplemental: Also run p/security-audit for additional taint-tracking rules from the registry
+      //    Results are merged and deduplicated with the auto scan results.
+      const priorCount = findings.length;
+      try {
+        const cmd = `"${opengrepCmd}" scan --config p/security-audit --taint-intrafile --quiet --json "."`;
+        const { stdout } = await execAsync(cmd, { cwd: workspaceRoot, maxBuffer: 30 * 1024 * 1024, timeout: 120000 });
+        parseAndAddResults(stdout);
+        scannedOk = true;
+        const newFindings = findings.length - priorCount;
+        if (newFindings > 0) {
+          onLog(`Opengrep security-audit registry scan added ${newFindings} additional finding(s).`);
+        }
+      } catch (regErr: any) {
+        if (regErr.stdout && regErr.stdout.trim().startsWith("{")) {
+          parseAndAddResults(regErr.stdout);
+          scannedOk = true;
+        }
+        // Registry rules may fail offline — that's OK, auto scan already ran
+      }
+
+      // 3. Final fallback: If neither auto nor registry worked, try p/default
+      if (!scannedOk) {
         try {
-          const { stdout } = await execAsync(cmd, { cwd: workspaceRoot, maxBuffer: 25 * 1024 * 1024 });
+          const cmd = `"${opengrepCmd}" scan --config p/default --quiet --json "."`;
+          const { stdout } = await execAsync(cmd, { cwd: workspaceRoot, maxBuffer: 30 * 1024 * 1024, timeout: 120000 });
           parseAndAddResults(stdout);
-        } catch (execErr: any) {
-          if (execErr.stdout) parseAndAddResults(execErr.stdout);
-        }
-      } else {
-        // Fallback: opengrep-core (OCaml CLI) — batch parallel per-lang groups
-        const langExtMap: Record<string, string> = {
-          ".ts": "ts", ".tsx": "ts", ".js": "js", ".jsx": "js",
-          ".mjs": "js", ".cjs": "js", ".py": "py", ".go": "go",
-          ".java": "java", ".rb": "ruby", ".php": "php",
-          ".c": "c", ".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp",
-          ".cs": "csharp", ".rs": "rust", ".kt": "kotlin",
-          ".swift": "swift", ".sh": "bash", ".bash": "bash",
-        };
-
-        // Group files by language for batch execution (one spawn per language instead of per-file)
-        const byLang = new Map<string, string[]>();
-        for (const file of scannableFiles) {
-          const lang = langExtMap[path.extname(file).toLowerCase()];
-          if (!lang) continue;
-          if (!byLang.has(lang)) byLang.set(lang, []);
-          byLang.get(lang)!.push(file);
-        }
-
-        onLog(`Running Opengrep-core AST engine across ${byLang.size} language group(s) in parallel...`);
-
-        // Run all language groups concurrently
-        const langTasks = Array.from(byLang.entries()).map(async ([lang, files]) => {
-          const chunkSize = 50;
-          for (let i = 0; i < files.length; i += chunkSize) {
-            const chunk = files.slice(i, i + chunkSize);
-            const fileArgs = chunk.map((f) => `"${f}"`).join(" ");
-            try {
-              const { stdout } = await execAsync(
-                `"${opengrepCmd}" -lang ${lang} -rules "${rulesFile}" -json_nodots ${fileArgs}`,
-                { cwd: workspaceRoot, maxBuffer: 10 * 1024 * 1024 }
-              );
-              parseAndAddResults(stdout);
-            } catch (fileErr: any) {
-              if (fileErr.stdout) parseAndAddResults(fileErr.stdout);
-            }
+          scannedOk = true;
+        } catch (fbErr: any) {
+          if (fbErr.stdout && fbErr.stdout.trim().startsWith("{")) {
+            parseAndAddResults(fbErr.stdout);
+            scannedOk = true;
           }
-        });
-
-        await Promise.all(langTasks);
+        }
       }
     } catch (e: any) {
       onLog(`Opengrep execution notice: ${e.message}`);
     } finally {
-      try { if (fs.existsSync(rulesFile)) fs.unlinkSync(rulesFile); } catch {}
-      // Clean up .semgrepignore only if we wrote it (don't delete user's existing file)
       if (semgrepignorePath) {
         try { fs.unlinkSync(semgrepignorePath); } catch {}
       }
     }
 
-    onLog(`Opengrep AST scan complete: ${findings.length} finding(s) detected.`);
+    onLog(`Opengrep AST scan complete: ${findings.length} finding(s) detected across all languages.`);
     return findings;
-  }
-
-  // =========================================================================
-  // 4. Tool 3: Language-Specific AST Security (Bandit Python AST)
-  // =========================================================================
-
-  public async runBandit(
-    workspaceRoot: string,
-    scannableFiles: string[],
-    onLog: (msg: string) => void
-  ): Promise<RawFinding[]> {
-    const findings: RawFinding[] = [];
-    const pyFiles = scannableFiles.filter((f) => f.toLowerCase().endsWith(".py"));
-    if (pyFiles.length === 0) {
-      return findings;
-    }
-
-    // Run Bandit exclusively on the unignored, verified Python source files
-    try {
-      onLog(`Running Bandit Python AST security analyzer directly on ${pyFiles.length} unignored Python files...`);
-      const chunkSize = 25;
-      for (let i = 0; i < pyFiles.length; i += chunkSize) {
-        const chunk = pyFiles.slice(i, i + chunkSize);
-        const fileArgs = chunk.map((f) => `"${f}"`).join(" ");
-        const cmd = `python -m bandit -f json -q ${fileArgs}`;
-        try {
-          const { stdout } = await execAsync(cmd, { cwd: workspaceRoot, maxBuffer: 10 * 1024 * 1024 });
-          this.parseBanditResults(stdout, workspaceRoot, findings);
-        } catch (e: any) {
-          if (e.stdout) {
-            this.parseBanditResults(e.stdout, workspaceRoot, findings);
-          }
-        }
-      }
-    } catch {}
-
-    return findings;
-  }
-
-  private parseBanditResults(stdout: string, workspaceRoot: string, findings: RawFinding[]): void {
-    if (!stdout || !stdout.trim()) return;
-    try {
-      const report = JSON.parse(stdout);
-      const results = report.results || [];
-      for (let i = 0; i < results.length; i++) {
-        const item = results[i];
-        const rawFn = item.filename || "";
-        const normFn = rawFn.toLowerCase().replace(/\\/g, "/");
-        if (normFn.includes("/node_modules/") || normFn.includes("/.opencode/") || normFn.includes("/.git/")) {
-          continue;
-        }
-        const sev = (item.issue_severity || "").toUpperCase();
-        const severity: RawFinding["severity"] = sev === "HIGH" ? "Critical" : sev === "MEDIUM" ? "High" : "Medium";
-        const relPath = path.relative(workspaceRoot, item.filename || "").replace(/\\/g, "/");
-
-        findings.push({
-          id: `BANDIT-${item.test_id}-${findings.length + 1}`,
-          tool: "Bandit Python AST Engine",
-          title: item.issue_text || item.test_name,
-          severity,
-          cwe: item.issue_cwe ? `CWE-${item.issue_cwe.id}` : "CWE-General",
-          category: item.test_name || "Python AST Security",
-          filePath: relPath,
-          line: item.line_number || 1,
-          endLine: (item.line_range && item.line_range[1]) || item.line_number || 1,
-          snippet: (item.code || "").trim(),
-          description: `Bandit AST analyzer flagged test ${item.test_id}: ${item.issue_text}`,
-          remediation: item.more_info || "Review code according to Python secure coding standards.",
-        });
-      }
-    } catch {}
   }
 
   public parseOsvOutput(stdout: string, workspaceRoot: string, findings: RawFinding[]): void {
     if (!stdout || !stdout.trim()) return;
     try {
-      const report = JSON.parse(stdout);
+      const firstBrace = stdout.indexOf("{");
+      const lastBrace = stdout.lastIndexOf("}");
+      if (firstBrace === -1 || lastBrace === -1) return;
+      const jsonStr = stdout.slice(firstBrace, lastBrace + 1);
+      const report = JSON.parse(jsonStr);
       const results = report.results || [];
       for (let rIdx = 0; rIdx < results.length; rIdx++) {
         const res = results[rIdx];
         const srcPath = res.source?.path || "manifest";
         const relFile = path.relative(workspaceRoot, srcPath).replace(/\\/g, "/");
+        const normRel = relFile.toLowerCase();
+        if (
+          normRel.startsWith("node_modules/") ||
+          normRel.includes("/node_modules/") ||
+          normRel.startsWith(".opencode/") ||
+          normRel.includes("/.opencode/") ||
+          normRel.startsWith(".git/") ||
+          normRel.includes("/.git/") ||
+          normRel.startsWith("dist/") ||
+          normRel.includes("/dist/") ||
+          normRel.startsWith("build/") ||
+          normRel.includes("/build/") ||
+          normRel.startsWith("vendor/") ||
+          normRel.includes("/vendor/")
+        ) {
+          continue;
+        }
         const packages = res.packages || [];
         for (let pIdx = 0; pIdx < packages.length; pIdx++) {
           const pkgItem = packages[pIdx];
           const pkgInfo = pkgItem.package || {};
           const pkgName = pkgInfo.name || "unknown-package";
           const pkgVersion = pkgInfo.version || "";
+          const ecosystem = pkgInfo.ecosystem ? ` (${pkgInfo.ecosystem})` : "";
           const vulns = pkgItem.vulnerabilities || [];
           for (let vIdx = 0; vIdx < vulns.length; vIdx++) {
             const v = vulns[vIdx];
-            const cweId = v.database_specific?.cwe_ids?.[0] || (v.cwe && v.cwe[0]) || "CWE-1395";
+            let cweId = "CWE-1395";
+            if (v.database_specific?.cwe_ids && v.database_specific.cwe_ids.length > 0) {
+              cweId = v.database_specific.cwe_ids[0];
+            } else if (v.cwe && v.cwe.length > 0) {
+              cweId = v.cwe[0];
+            }
             const sevRaw = (v.database_specific?.severity || "").toUpperCase();
             const severity: RawFinding["severity"] =
               sevRaw === "CRITICAL" ? "Critical" :
               sevRaw === "HIGH" ? "High" :
               sevRaw === "LOW" ? "Low" : "Medium";
-            const alias = (v.aliases && v.aliases[0]) ? ` (${v.aliases[0]})` : "";
+            const alias = (v.aliases && v.aliases[0]) ? ` [${v.aliases[0]}]` : "";
 
             findings.push({
               id: `OSV-${v.id || pkgName}-${findings.length + 1}`,
               tool: "Google OSV-Scanner",
-              title: `Vulnerable Dependency: ${pkgName}@${pkgVersion}${alias}`,
+              title: `Vulnerable Dependency: ${pkgName}@${pkgVersion}${alias}${ecosystem}`,
               severity,
               cwe: cweId,
               category: "Supply Chain",
@@ -957,7 +930,7 @@ ${pathLines}
   }
 
   // =========================================================================
-  // 5. Tool 4: Supply Chain Security (OSV-Scanner & npm audit)
+  // 4. Tool 4: Universal Supply Chain Security (Google OSV-Scanner & npm audit)
   // =========================================================================
 
   public async runSupplyChainAudits(
@@ -967,66 +940,33 @@ ${pathLines}
   ): Promise<RawFinding[]> {
     const findings: RawFinding[] = [];
 
-    // 1. Google OSV-Scanner: Target verified manifests only (never crawl entire disk)
+    // 1. Google OSV-Scanner: Universal multi-language recursive dependency auditor (Go, Rust, Py, JS/TS, Java, PHP, Ruby, etc.)
     const osvCmd = await this.getOsvScannerPath(onLog);
     if (osvCmd) {
       try {
-        const manifestNames = [
-          "package-lock.json",
-          "yarn.lock",
-          "pnpm-lock.yaml",
-          "requirements.txt",
-          "Pipfile.lock",
-          "poetry.lock",
-          "pom.xml",
-          "go.mod",
-          "go.sum",
-          "Cargo.lock",
-          "composer.lock",
-        ];
-
-        const targetManifests: string[] = [];
-        for (const mName of manifestNames) {
-          const mPath = path.join(workspaceRoot, mName);
-          if (fs.existsSync(mPath)) {
-            targetManifests.push(mPath);
+        onLog(`Running Google OSV-Scanner universal multi-language dependency auditor across workspace...`);
+        const cmd = `"${osvCmd}" scan -r --format json --skip-git "${workspaceRoot}"`;
+        try {
+          const { stdout } = await execAsync(cmd, { cwd: workspaceRoot, maxBuffer: 25 * 1024 * 1024 });
+          if (stdout && stdout.trim()) {
+            this.parseOsvOutput(stdout, workspaceRoot, findings);
           }
-        }
-
-        // Also check if any manifest is present in scannableFiles
-        for (const sf of scannableFiles) {
-          const bName = path.basename(sf).toLowerCase();
-          if (manifestNames.map((m) => m.toLowerCase()).includes(bName) && !targetManifests.includes(sf)) {
-            targetManifests.push(sf);
+        } catch (err: any) {
+          // OSV-Scanner exits with code 1 when vulnerabilities are identified
+          if (err.stdout && err.stdout.trim()) {
+            this.parseOsvOutput(err.stdout, workspaceRoot, findings);
+          } else if (err.message) {
+            onLog(`OSV-Scanner execution notice: ${err.message}`);
           }
-        }
-
-        if (targetManifests.length > 0) {
-          onLog(`Running Google OSV-Scanner across ${targetManifests.length} verified project package manifests...`);
-          for (const mPath of targetManifests) {
-            try {
-              const cmd = `"${osvCmd}" scan --lockfile="${mPath}" --format json`;
-              const { stdout } = await execAsync(cmd, { cwd: workspaceRoot, maxBuffer: 15 * 1024 * 1024 });
-              if (stdout && stdout.trim()) {
-                this.parseOsvOutput(stdout, workspaceRoot, findings);
-              }
-            } catch (err: any) {
-              if (err.stdout) {
-                this.parseOsvOutput(err.stdout, workspaceRoot, findings);
-              }
-            }
-          }
-        } else {
-          onLog("No unignored package manifests found; skipping OSV-Scanner.");
         }
       } catch (e: any) {
         onLog(`OSV-Scanner execution notice: ${e.message}`);
       }
     }
 
-    // 2. npm audit for Node projects
-    const pkgJson = path.join(workspaceRoot, "package.json");
-    if (fs.existsSync(pkgJson)) {
+    // 2. npm audit for Node projects (only if package-lock.json exists to avoid network resolution stalls)
+    const pkgLock = path.join(workspaceRoot, "package-lock.json");
+    if (fs.existsSync(pkgLock)) {
       try {
         onLog("Running native npm audit against registry security advisories...");
         const { stdout } = await execAsync("npm audit --json", { cwd: workspaceRoot, maxBuffer: 15 * 1024 * 1024 });

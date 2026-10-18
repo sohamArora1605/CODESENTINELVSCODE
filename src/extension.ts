@@ -4,7 +4,6 @@ import { WorkspaceManager } from "./workspace/workspaceManager";
 import { OpenCodeLauncher } from "./opencode/opencodeLauncher";
 import { CodeSentinelMcpServer } from "./mcp/mcpServer";
 import { SidebarProvider } from "./ui/sidebarProvider";
-import { DockerClient } from "./docker/dockerClient";
 import { DependencyManager } from "./services/dependencyManager";
 import { SecurityToolManager } from "./scanner/securityToolManager";
 
@@ -41,7 +40,12 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
       SidebarProvider.viewType,
-      sidebarProvider
+      sidebarProvider,
+      {
+        webviewOptions: {
+          retainContextWhenHidden: true,
+        },
+      }
     )
   );
 
@@ -74,14 +78,21 @@ export function activate(context: vscode.ExtensionContext) {
 
   const initialRoot = workspaceManager.getActiveWorkspaceRoot();
   if (initialRoot) {
-    autoSyncMcp(initialRoot);
+    autoSyncMcp(initialRoot).then(() => {
+      // Automatically launch OpenCode & CodeSentinel MCP service right upon starting extension
+      opencodeLauncher.startWebProcess(initialRoot).catch((err) => {
+        console.warn("OpenCode MCP runtime auto-start notice:", err?.message);
+      });
+    });
   }
 
   workspaceManager.onDidChangeWorkspace(() => {
     updateStatusBar(workspaceManager);
     const root = workspaceManager.getActiveWorkspaceRoot();
     if (root) {
-      autoSyncMcp(root);
+      autoSyncMcp(root).then(() => {
+        opencodeLauncher.startWebProcess(root).catch(() => {});
+      });
     }
   });
 
@@ -348,6 +359,25 @@ export function activate(context: vscode.ExtensionContext) {
       opencodeLauncher.launchTerminal(root);
     }
   }
+
+  // Non-blocking background Atlas code graph indexing on extension activation
+  setTimeout(async () => {
+    try {
+      const activeWorkspace = workspaceManager.getActiveWorkspaceRoot();
+      if (activeWorkspace) {
+        const { GraphService } = await import("./graph/graphService");
+        const graphService = GraphService.getInstance();
+        if (!graphService.isGraphAvailable(activeWorkspace)) {
+          console.log("CodeSentinel: Initiating background Atlas code graph indexing...");
+          await opencodeLauncher.indexWithAtlas(activeWorkspace);
+          console.log("CodeSentinel: Background Atlas indexing finished.");
+          sidebarProvider.notifyGraphReady();
+        }
+      }
+    } catch (e: any) {
+      console.warn("Background Atlas code graph indexing notice:", e?.message);
+    }
+  }, 2000);
 
   console.log("CodeSentinel extension activated successfully.");
 }

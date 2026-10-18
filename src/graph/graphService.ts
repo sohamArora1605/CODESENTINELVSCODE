@@ -146,7 +146,15 @@ export class GraphService {
   }
 
   public getDbPath(workspaceRoot: string): string {
-    return path.join(workspaceRoot, ".atlas", "atlas.db");
+    const sentinelPath = path.join(workspaceRoot, ".codesentinel", "atlas.db");
+    if (fs.existsSync(sentinelPath)) {
+      return sentinelPath;
+    }
+    const legacyPath = path.join(workspaceRoot, ".atlas", "atlas.db");
+    if (fs.existsSync(legacyPath)) {
+      return legacyPath;
+    }
+    return sentinelPath;
   }
 
   public isGraphAvailable(workspaceRoot: string): boolean {
@@ -852,13 +860,13 @@ export class GraphService {
   }
 
   public saveFlowDiagram(workspaceRoot: string, flow: FlowExplainerResult): string {
-    const atlasDir = path.join(workspaceRoot, ".atlas");
-    if (!fs.existsSync(atlasDir)) {
+    const sentinelDir = path.join(workspaceRoot, ".codesentinel");
+    if (!fs.existsSync(sentinelDir)) {
       try {
-        fs.mkdirSync(atlasDir, { recursive: true });
+        fs.mkdirSync(sentinelDir, { recursive: true });
       } catch {}
     }
-    const flowPath = path.join(atlasDir, "flow.json");
+    const flowPath = path.join(sentinelDir, "flow.json");
     try {
       fs.writeFileSync(flowPath, JSON.stringify(flow, null, 2), "utf-8");
     } catch {}
@@ -866,10 +874,16 @@ export class GraphService {
   }
 
   public getSavedFlowDiagram(workspaceRoot: string): FlowExplainerResult | null {
-    const flowPath = path.join(workspaceRoot, ".atlas", "flow.json");
-    if (fs.existsSync(flowPath)) {
+    const sentinelPath = path.join(workspaceRoot, ".codesentinel", "flow.json");
+    if (fs.existsSync(sentinelPath)) {
       try {
-        return JSON.parse(fs.readFileSync(flowPath, "utf-8"));
+        return JSON.parse(fs.readFileSync(sentinelPath, "utf-8"));
+      } catch {}
+    }
+    const legacyPath = path.join(workspaceRoot, ".atlas", "flow.json");
+    if (fs.existsSync(legacyPath)) {
+      try {
+        return JSON.parse(fs.readFileSync(legacyPath, "utf-8"));
       } catch {}
     }
     return null;

@@ -78,9 +78,9 @@ export async function testOpenCodeLauncher(): Promise<void> {
     const excludeArgs = launcher.buildAtlasExcludeArgs(tmpDir);
     assert.ok(excludeArgs.includes("--exclude \"**/node_modules/**\""), "Should format exclude args");
     assert.ok(excludeArgs.includes("--exclude \"**/*.mp3\""), "Should format media exclude args");
-    // Test 5d: Verify auto-provisioning of cloud-security-audit skill
-    const skillPath = path.join(tmpDir, ".opencode", "skills", "cloud-security-audit");
-    assert.ok(fs.existsSync(skillPath), ".opencode/skills/cloud-security-audit directory must be auto-provisioned");
+    // Test 5d: Verify auto-provisioning of cloud-security-audit skill in .codesentinel/skills
+    const skillPath = path.join(tmpDir, ".codesentinel", "skills", "cloud-security-audit");
+    assert.ok(fs.existsSync(skillPath), ".codesentinel/skills/cloud-security-audit directory must be auto-provisioned");
     assert.ok(fs.existsSync(path.join(skillPath, "SKILL.md")), "SKILL.md must be auto-provisioned");
     assert.ok(fs.existsSync(path.join(skillPath, "RECONNAISSANCE.md")), "RECONNAISSANCE.md must be auto-provisioned");
     assert.ok(fs.existsSync(path.join(skillPath, "HUNTING.md")), "HUNTING.md must be auto-provisioned");

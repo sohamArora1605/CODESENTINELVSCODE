@@ -9,7 +9,8 @@ import * as fs from "fs";
 import * as path from "path";
 import { WorkspaceContext } from "../types";
 import { GraphService } from "../graph/graphService";
-import { VulnerabilityScanner } from "../scanner/vulnerabilityScanner";
+import { VulnerabilityScanner, ClubbedFinding } from "../scanner/vulnerabilityScanner";
+import { CegarVerifier } from "../scanner/cegarVerifier";
 
 export type McpToolHandler = (args: any, context?: WorkspaceContext | null) => Promise<{
   content: Array<{ type: "text"; text: string }>;
@@ -263,14 +264,14 @@ export class CodeSentinelMcpServer {
     // Builtin tool 3: Atlas Code Graph Status
     this.registerTool(
       "codesentinel_atlas_graph_status",
-      "Inspect Atlas code graph database state (.atlas/atlas.db) for the active workspace, reporting whether the graph index is ready.",
+      "Inspect Atlas code graph database state (.codesentinel/atlas.db) for the active workspace, reporting whether the graph index is ready.",
       {
         type: "object",
         properties: {},
       },
       async (_args, context) => {
         const ctx = context || this.resolveContext();
-        const dbPath = path.join(ctx.rootPath, ".atlas", "atlas.db");
+        const dbPath = GraphService.getInstance().getDbPath(ctx.rootPath);
         const exists = fs.existsSync(dbPath);
         let sizeBytes = 0;
         let stats: any = null;
@@ -1254,9 +1255,10 @@ export class CodeSentinelMcpServer {
     const scanVulHandler: McpToolHandler = async (args, context) => {
       const ctx = context || this.resolveContext();
       const rootPath = args?.workspacePath || ctx.rootPath;
+      const forceRefresh = Boolean(args?.forceRefresh);
       try {
         const scanner = VulnerabilityScanner.getInstance();
-        const result = await scanner.scanProject(rootPath);
+        const result = await scanner.scanProject(rootPath, undefined, forceRefresh);
         return {
           content: [
             {
@@ -1277,9 +1279,22 @@ export class CodeSentinelMcpServer {
       type: "object",
       properties: {
         workspacePath: { type: "string", description: "Optional project folder path (defaults to active workspace)" },
+        forceRefresh: { type: "boolean", description: "Set true to bypass cache and force a complete fresh multi-engine rescan. If omitted/false, returns previous scan results from cache instantly if available." },
       },
     };
 
+    this.registerTool(
+      "codesentinel_run_vulnerability_scan",
+      "Scan entire active project directory for security vulnerabilities using 4 consensus engines (Universal SAST, High-Entropy Secret Detector, Atlas AST Code Graph Dataflow, and Dependency Manifest CVE Auditor). Deeply respects .gitignore and filters media/binary files. Returns structured findings, severity counts, and tool execution breakdown.",
+      scanVulSchema,
+      scanVulHandler
+    );
+    this.registerTool(
+      "run_vulnerability_scan",
+      "Scan entire active project directory for security vulnerabilities using 4 consensus engines.",
+      scanVulSchema,
+      scanVulHandler
+    );
     this.registerTool(
       "codesentinel_scan_vulnerabilities",
       "Scan entire active project directory for security vulnerabilities using 4 consensus engines (Universal SAST, High-Entropy Secret Detector, Atlas AST Code Graph Dataflow, and Dependency Manifest CVE Auditor). Deeply respects .gitignore and filters media/binary files.",
@@ -1291,6 +1306,119 @@ export class CodeSentinelMcpServer {
       "Scan entire active project directory for security vulnerabilities using 4 consensus engines.",
       scanVulSchema,
       scanVulHandler
+    );
+    this.registerTool(
+      "codesentinel_vulnerability_scan",
+      "Scan entire active project directory for security vulnerabilities using 4 consensus engines.",
+      scanVulSchema,
+      scanVulHandler
+    );
+    this.registerTool(
+      "analyze_security_vulnerabilities",
+      "Scan entire active workspace for security vulnerabilities across 4 consensus engines (Opengrep AST SAST, Gitleaks secrets detector, Atlas AST dataflow, and OSV supply chain auditor) and automatically verify each alert with CEGAR mathematical invariant checking.",
+      scanVulSchema,
+      scanVulHandler
+    );
+    this.registerTool(
+      "codesentinel_analyze_security_vulnerabilities",
+      "Scan entire active workspace for security vulnerabilities across 4 consensus engines (Opengrep AST SAST, Gitleaks secrets detector, Atlas AST dataflow, and OSV supply chain auditor) and automatically verify each alert with CEGAR mathematical invariant checking.",
+      scanVulSchema,
+      scanVulHandler
+    );
+
+    // =========================================================================
+    // Dedicated Standalone CEGAR Invariant Verification MCP Tool
+    // =========================================================================
+    const cegarVerifyHandler: McpToolHandler = async (args, context) => {
+      const ctx = context || this.resolveContext();
+      const rootPath = args?.workspacePath || ctx.rootPath;
+      if (!args?.filePath || !args?.line) {
+        return {
+          content: [{ type: "text", text: "Error: Both 'filePath' and 'line' are required arguments for CEGAR verification." }],
+          isError: true,
+        };
+      }
+      try {
+        const candidateFinding: ClubbedFinding = {
+          id: args.id || `CANDIDATE-${Date.now()}`,
+          title: args.title || `Vulnerability Alert at ${args.filePath}:${args.line}`,
+          severity: args.severity || "High",
+          cwe: args.cwe || "CWE-20",
+          category: args.category || "Security",
+          filePath: args.filePath,
+          line: Number(args.line),
+          endLine: Number(args.endLine || args.line),
+          snippet: args.snippet || "",
+          description: args.description || "Candidate security finding submitted for CEGAR verification",
+          remediation: args.remediation || "",
+          tools: ["OpenCode CEGAR Query"],
+          symbolName: args.symbolName,
+        };
+        const verifier = CegarVerifier.getInstance();
+        const result = await verifier.verifyFinding(candidateFinding, rootPath);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  ok: true,
+                  target: `${args.filePath}:${args.line}`,
+                  cwe: candidateFinding.cwe,
+                  cegarVerdict: result.verdict,
+                  confidence: result.confidence,
+                  reason: result.reason,
+                  mathematicalProof: result.proof,
+                  invariantLearned: result.invariantLearned || null,
+                  trace: result.trace || [],
+                  guidance:
+                    result.verdict === "DEFENDED"
+                      ? "ALERT IS A PROVEN FALSE POSITIVE: Refuted by mathematical invariant or bounded sanitizer. Do not alter production code."
+                      : result.verdict === "CONFIRMED"
+                      ? "VULNERABILITY IS MATHEMATICALLY CONFIRMED: Proceed to remediation. Use Atlas Code Graph to trace tainted parameters."
+                      : "CANDIDATE REQUIREMENT: Preserved under Fail-Open safety guarantee. Manually inspect reachability using Atlas Code Graph.",
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (err: any) {
+        return {
+          content: [{ type: "text", text: `CEGAR verification error: ${err.message}` }],
+          isError: true,
+        };
+      }
+    };
+
+    const cegarVerifySchema = {
+      type: "object",
+      properties: {
+        filePath: { type: "string", description: "Relative or absolute file path of the candidate finding" },
+        line: { type: "number", description: "1-indexed line number of the candidate vulnerability sink/source" },
+        endLine: { type: "number", description: "Optional 1-indexed end line number" },
+        cwe: { type: "string", description: "CWE identifier (e.g. CWE-22, CWE-78, CWE-798, CWE-89)" },
+        title: { type: "string", description: "Optional vulnerability title or check identifier" },
+        snippet: { type: "string", description: "Optional code snippet at the vulnerability location" },
+        category: { type: "string", description: "Optional category (e.g. Command Injection, Path Traversal, Secrets)" },
+        symbolName: { type: "string", description: "Optional function or method name containing the finding" },
+        workspacePath: { type: "string", description: "Optional workspace root path (defaults to active workspace)" },
+      },
+      required: ["filePath", "line"],
+    };
+
+    this.registerTool(
+      "codesentinel_verify_vulnerability_cegar",
+      "Mathematically verify or refute a security alert or candidate code vulnerability using Counterexample-Guided Abstraction Refinement (CEGAR). Evaluates deterministic fast-path invariants, Opengrep Generic AST taint flow, and Atlas Code Graph reachability. Returns CONFIRMED, DEFENDED, or CANDIDATE verdict with proof.",
+      cegarVerifySchema,
+      cegarVerifyHandler
+    );
+    this.registerTool(
+      "verify_vulnerability_cegar",
+      "Mathematically verify or refute a security alert or candidate code vulnerability using Counterexample-Guided Abstraction Refinement (CEGAR). Returns CONFIRMED, DEFENDED, or CANDIDATE verdict with proof.",
+      cegarVerifySchema,
+      cegarVerifyHandler
     );
   }
 }

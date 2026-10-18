@@ -134,6 +134,7 @@ export class WorkspaceManager {
       "node_modules",
       ".git",
       ".atlas",
+      ".codesentinel",
       "target",
       "build",
       ".gradle",

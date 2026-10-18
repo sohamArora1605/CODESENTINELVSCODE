@@ -16,11 +16,21 @@ export interface DependencyStatus {
   atlasPath?: string;
 }
 
+export interface ProvisionProgress {
+  stage: string;
+  percent: number;
+  detail: string;
+  completed?: boolean;
+  error?: boolean;
+}
+
 export class DependencyManager {
   private static instance: DependencyManager;
   private cachedAtlasPath: string | null = null;
   private cachedOpencodePath: string | null = null;
   private globalStoragePath: string | null = null;
+  private progressListeners: ((p: ProvisionProgress) => void)[] = [];
+  private lastReportedProgress: ProvisionProgress | null = null;
 
   private constructor() {}
 
@@ -29,6 +39,23 @@ export class DependencyManager {
       DependencyManager.instance = new DependencyManager();
     }
     return DependencyManager.instance;
+  }
+
+  public onProgress(listener: (p: ProvisionProgress) => void): () => void {
+    this.progressListeners.push(listener);
+    if (this.lastReportedProgress) {
+      try { listener(this.lastReportedProgress); } catch {}
+    }
+    return () => {
+      this.progressListeners = this.progressListeners.filter((l) => l !== listener);
+    };
+  }
+
+  public reportProgress(p: ProvisionProgress): void {
+    this.lastReportedProgress = p;
+    for (const l of this.progressListeners) {
+      try { l(p); } catch {}
+    }
   }
 
   public setStoragePath(p: string): void {
@@ -246,18 +273,30 @@ export class DependencyManager {
               reject(new Error(`Failed to download: HTTP status ${res.statusCode}`));
               return;
             }
+            const expectedLength = parseInt(res.headers["content-length"] || "0", 10);
+            let downloadedBytes = 0;
+            res.on("data", (chunk) => {
+              downloadedBytes += chunk.length;
+            });
             const fileStream = fs.createWriteStream(destPath);
             res.pipe(fileStream);
             fileStream.on("finish", () => {
-              fileStream.close(() => resolve());
+              fileStream.close(() => {
+                if (expectedLength > 0 && downloadedBytes < expectedLength) {
+                  try { fs.unlinkSync(destPath); } catch {}
+                  reject(new Error(`Download truncated: expected ${expectedLength} bytes, received ${downloadedBytes}`));
+                } else {
+                  resolve();
+                }
+              });
             });
             fileStream.on("error", (err) => {
-              fs.unlink(destPath, () => {});
+              try { fs.unlinkSync(destPath); } catch {}
               reject(err);
             });
           })
           .on("error", (err) => {
-            fs.unlink(destPath, () => {});
+            try { fs.unlinkSync(destPath); } catch {}
             reject(err);
           });
       };
@@ -276,6 +315,28 @@ export class DependencyManager {
 
     const binDir = path.join(storagePath, "bin");
     fs.mkdirSync(binDir, { recursive: true });
+
+    const binName = process.platform === "win32" ? "atlas.exe" : "atlas";
+    const binaryPath = path.join(binDir, binName);
+
+    // If local verified binary already exists in user's codesentinel store, copy it instantly
+    const primaryLocalBin = path.join(this.getStoragePath(), "bin", binName);
+    const homeLocalBin = path.join(os.homedir(), ".codesentinel", "bin", binName);
+    const candidateBin = fs.existsSync(primaryLocalBin) ? primaryLocalBin : fs.existsSync(homeLocalBin) ? homeLocalBin : null;
+
+    if (candidateBin && candidateBin !== binaryPath && fs.existsSync(candidateBin)) {
+      try {
+        const stat = fs.statSync(candidateBin);
+        if (stat.size > 20 * 1024 * 1024) {
+          fs.copyFileSync(candidateBin, binaryPath);
+          if (process.platform !== "win32") {
+            try { fs.chmodSync(binaryPath, 0o755); } catch {}
+          }
+          this.cachedAtlasPath = binaryPath;
+          return binaryPath;
+        }
+      } catch {}
+    }
 
     const downloadUrl = `https://github.com/LordCasser/atlas/releases/download/v1.7.0/${assetName}`;
     const archivePath = path.join(storagePath, assetName);
@@ -297,9 +358,6 @@ export class DependencyManager {
     try {
       fs.unlinkSync(archivePath);
     } catch {}
-
-    const binName = process.platform === "win32" ? "atlas.exe" : "atlas";
-    const binaryPath = path.join(binDir, binName);
 
     if (process.platform !== "win32" && fs.existsSync(binaryPath)) {
       try {
@@ -409,21 +467,45 @@ export class DependencyManager {
     const { SecurityToolManager } = await import("../scanner/securityToolManager");
     SecurityToolManager.getInstance().setStoragePath(storagePath);
 
+    this.reportProgress({
+      stage: "Verifying runtime tools",
+      percent: 15,
+      detail: "Checking self-contained OpenCode and Atlas semantic engine...",
+    });
+
     // Background warm-provisioning of all security scanning tools (Opengrep, Gitleaks, OSV-Scanner)
     SecurityToolManager.getInstance()
-      .ensureSecurityTools()
+      .ensureSecurityTools((msg) => {
+        this.reportProgress({
+          stage: "Provisioning Security Scanner Tools",
+          percent: 50,
+          detail: msg,
+        });
+      })
       .catch((err) => {
         console.warn("Security scanner tools auto-provisioning background notice:", err?.message);
       });
 
     const status = await this.checkDependencies(storagePath);
     if (status.opencodeInstalled && status.atlasInstalled) {
+      this.reportProgress({
+        stage: "Runtime tools ready",
+        percent: 100,
+        detail: "OpenCode AI Agent and Atlas Semantic Engine verified.",
+        completed: true,
+      });
       return;
     }
 
     const missing: string[] = [];
     if (!status.opencodeInstalled) missing.push("OpenCode AI Agent");
     if (!status.atlasInstalled) missing.push("Atlas Semantic Engine");
+
+    this.reportProgress({
+      stage: "Installing runtime tools",
+      percent: 30,
+      detail: `Setting up: ${missing.join(", ")}...`,
+    });
 
     await vscode.window.withProgress(
       {
@@ -433,6 +515,11 @@ export class DependencyManager {
       },
       async (progress) => {
         if (!status.opencodeInstalled) {
+          this.reportProgress({
+            stage: "Setting up OpenCode AI Agent",
+            percent: 45,
+            detail: "Configuring OpenCode in self-contained extension storage...",
+          });
           progress.report({ message: "Configuring OpenCode agent in self-contained extension storage..." });
           try {
             await this.installOpenCode(storagePath);
@@ -442,6 +529,11 @@ export class DependencyManager {
         }
 
         if (!status.atlasInstalled) {
+          this.reportProgress({
+            stage: "Setting up Atlas Code Graph Engine",
+            percent: 75,
+            detail: "Downloading Atlas semantic code graph engine...",
+          });
           progress.report({ message: "Downloading Atlas semantic code graph engine into extension storage..." });
           try {
             await this.installAtlas(storagePath);
@@ -449,6 +541,13 @@ export class DependencyManager {
             console.warn(`Could not setup Atlas: ${err.message}`);
           }
         }
+
+        this.reportProgress({
+          stage: "Runtime tools ready",
+          percent: 100,
+          detail: "All self-contained runtime tools verified and ready.",
+          completed: true,
+        });
       }
     );
   }

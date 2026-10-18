@@ -7,9 +7,16 @@ out/
 *.tsbuildinfo
 .atlas/
 
-# Extension Packaging and Testing
+# Extension Packaging, Benchmarking, and Testing
 .vscode-test/
 *.vsix
+.opencode/
+.codesentinel/
+benchmark/repos/
+benchmark/real_vulnerable_repos/
+test_empty_allowlist.toml
+.gemini/
+~$*.docx
 
 # Environment & Logs
 *.log

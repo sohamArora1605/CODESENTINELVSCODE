@@ -27,6 +27,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private readonly _opencodeLauncher: OpenCodeLauncher,
     private readonly _mcpServer: CodeSentinelMcpServer
   ) {
+    // Listen to DependencyManager setup progress to notify webview in real-time
+    import("../services/dependencyManager").then(({ DependencyManager }) => {
+      DependencyManager.getInstance().onProgress((progress) => {
+        this._view?.webview.postMessage({
+          command: "toolInstallProgress",
+          progress,
+        });
+      });
+    }).catch(() => {});
+
     this._workspaceManager.onDidChangeWorkspace(async () => {
       const workspace = this._workspaceManager.getContext();
       if (workspace) {
@@ -77,6 +87,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           })
           .catch(() => { });
       }
+
+      // Automatically load previous vulnerability scan results from persistent cache
+      try {
+        const cachedScan = VulnerabilityScanner.getInstance().getLatestScan(workspace.rootPath);
+        if (cachedScan) {
+          setTimeout(() => {
+            this._view?.webview.postMessage({
+              command: "vulScanComplete",
+              result: cachedScan,
+              fromCache: true,
+            });
+          }, 350);
+        }
+      } catch {}
     }
 
     webviewView.webview.onDidReceiveMessage(async (data) => {
@@ -226,21 +250,27 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             out.appendLine(`================================================================================`);
 
             const scanner = VulnerabilityScanner.getInstance();
-            const result = await scanner.scanProject(workspace.rootPath, (scanned, total, file, log) => {
-              this._view?.webview.postMessage({
-                command: "vulScanProgress",
-                scanned,
-                total,
-                file,
-                log,
-              });
-              if (log) {
-                out.appendLine(`[${log.timestamp}] [${log.engine}] ${log.message}${log.detail ? " -> " + log.detail : ""}`);
-              }
-            });
+            const forceRefresh = Boolean(data.forceRefresh);
+            const result = await scanner.scanProject(
+              workspace.rootPath,
+              (scanned, total, file, log) => {
+                this._view?.webview.postMessage({
+                  command: "vulScanProgress",
+                  scanned,
+                  total,
+                  file,
+                  log,
+                });
+                if (log) {
+                  out.appendLine(`[${log.timestamp}] [${log.engine}] ${log.message}${log.detail ? " -> " + log.detail : ""}`);
+                }
+              },
+              forceRefresh
+            );
             this._view?.webview.postMessage({
               command: "vulScanComplete",
               result,
+              fromCache: false,
             });
             out.appendLine(`--------------------------------------------------------------------------------`);
             out.appendLine(`Scan Finished: ${result.summary.total} total clubbed findings (Critical: ${result.summary.critical}, High: ${result.summary.high}, Medium: ${result.summary.medium}, Low: ${result.summary.low})`);
@@ -523,7 +553,29 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
   public updateWebviewContent(): void {
     if (this._view) {
-      this._view.webview.html = this.getHtmlContent(this._view.webview);
+      const workspace = this._workspaceManager.getContext();
+      const hasAtlasDb = workspace ? fs.existsSync(GraphService.getInstance().getDbPath(workspace.rootPath)) : false;
+      this._view.webview.postMessage({
+        command: "updateContext",
+        workspace: workspace ? {
+          name: workspace.name,
+          rootPath: workspace.rootPath,
+          detectedLanguages: workspace.detectedLanguages,
+          hasOpenCodeConfig: workspace.hasOpenCodeConfig,
+          hasAtlasDb,
+        } : null,
+        serverUrl: this._opencodeLauncher.getWebServerUrl(),
+        isWebRunning: this._opencodeLauncher.isWebRunning(),
+      });
+    }
+  }
+
+  public notifyGraphReady(): void {
+    if (this._view) {
+      this.updateWebviewContent();
+      this._view.webview.postMessage({ command: "graphReady" });
+      this._view.webview.postMessage({ command: "getGraphStats" });
+      this._view.webview.postMessage({ command: "getGraphData" });
     }
   }
 
@@ -540,7 +592,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     const tools = this._mcpServer.getRegisteredTools();
     const serverUrl = this._opencodeLauncher.getWebServerUrl();
     const isWebRunning = this._opencodeLauncher.isWebRunning();
-    const hasAtlasDb = workspace ? fs.existsSync(path.join(workspace.rootPath, ".atlas", "atlas.db")) : false;
+    const hasAtlasDb = workspace ? fs.existsSync(GraphService.getInstance().getDbPath(workspace.rootPath)) : false;
 
     const workspaceHtml = workspace
       ? `
@@ -564,13 +616,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           </div>
           <div class="meta-row">
             <span class="label">OpenCode MCP:</span>
-            <span class="badge ${workspace.hasOpenCodeConfig ? "badge-success" : "badge-warn"}">
+            <span id="badge-mcp-status" class="badge ${workspace.hasOpenCodeConfig ? "badge-success" : "badge-warn"}">
               ${workspace.hasOpenCodeConfig ? "Configured" : "Not Linked"}
             </span>
           </div>
           <div class="meta-row">
             <span class="label">Atlas Graph:</span>
-            <span class="badge ${hasAtlasDb ? "badge-success" : "badge-warn"}">
+            <span id="badge-atlas-status" class="badge ${hasAtlasDb ? "badge-success" : "badge-warn"}">
               ${hasAtlasDb ? "Indexed" : "Not Indexed"}
             </span>
           </div>
@@ -630,11 +682,171 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           flex-direction: column;
         }
 
+        /* Instant Ultra-Fast Static Splash Screen */
+        .instant-splash {
+          position: fixed;
+          inset: 0;
+          background: #0f1117;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          z-index: 9999;
+          transition: opacity 0.4s ease, visibility 0.4s ease;
+        }
+
+        .instant-splash.hidden {
+          opacity: 0;
+          visibility: hidden;
+          pointer-events: none;
+        }
+
+        .splash-content {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          text-align: center;
+          padding: 24px 18px;
+          max-width: 280px;
+        }
+
+        .splash-logo {
+          width: 54px;
+          height: 54px;
+          border-radius: 14px;
+          background: rgba(56, 189, 248, 0.1);
+          border: 1px solid rgba(56, 189, 248, 0.3);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          margin-bottom: 12px;
+          box-shadow: 0 0 20px rgba(56, 189, 248, 0.25);
+          animation: pulseGlow 1.8s infinite ease-in-out;
+        }
+
+        @keyframes pulseGlow {
+          0%, 100% { box-shadow: 0 0 15px rgba(56, 189, 248, 0.2); transform: scale(1); }
+          50% { box-shadow: 0 0 28px rgba(56, 189, 248, 0.5); transform: scale(1.04); }
+        }
+
+        .splash-title {
+          font-size: 15px;
+          font-weight: 700;
+          color: #f1f5f9;
+          letter-spacing: 0.5px;
+        }
+
+        .splash-sub {
+          font-size: 10px;
+          color: #94a3b8;
+          margin-top: 3px;
+          margin-bottom: 16px;
+        }
+
+        .splash-progress-track {
+          width: 140px;
+          height: 3px;
+          background: rgba(255, 255, 255, 0.08);
+          border-radius: 2px;
+          overflow: hidden;
+          margin-bottom: 8px;
+          position: relative;
+        }
+
+        .splash-progress-bar {
+          position: absolute;
+          height: 100%;
+          width: 50%;
+          background: linear-gradient(90deg, #38bdf8, #818cf8);
+          border-radius: 2px;
+          animation: splashSlide 1.2s infinite ease-in-out;
+        }
+
+        @keyframes splashSlide {
+          0% { left: -50%; width: 40%; }
+          50% { left: 25%; width: 60%; }
+          100% { left: 110%; width: 40%; }
+        }
+
+        .splash-status {
+          font-size: 10px;
+          font-family: monospace;
+          color: #38bdf8;
+        }
+
         .app-container {
           display: flex;
           flex-direction: column;
           height: 100%;
           width: 100%;
+        }
+
+        /* First-Time Setup Live Progress Banner */
+        .setup-banner {
+          background: linear-gradient(135deg, rgba(30, 41, 59, 0.95), rgba(15, 23, 42, 0.98));
+          border-bottom: 1px solid rgba(56, 189, 248, 0.3);
+          padding: 8px 10px;
+          display: flex;
+          flex-direction: column;
+          gap: 5px;
+          z-index: 100;
+          box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        }
+
+        .setup-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+        }
+
+        .setup-title {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          font-size: 11px;
+          font-weight: 700;
+          color: var(--accent-blue);
+        }
+
+        .setup-spinner {
+          width: 10px;
+          height: 10px;
+          border: 2px solid rgba(56, 189, 248, 0.2);
+          border-top-color: var(--accent-blue);
+          border-radius: 50%;
+          animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+          to { transform: rotate(360deg); }
+        }
+
+        .setup-pct {
+          font-size: 10px;
+          font-weight: 800;
+          font-family: monospace;
+          color: var(--accent-green);
+        }
+
+        .setup-bar-track {
+          width: 100%;
+          height: 4px;
+          background: rgba(255, 255, 255, 0.08);
+          border-radius: 2px;
+          overflow: hidden;
+        }
+
+        .setup-bar-fill {
+          height: 100%;
+          background: linear-gradient(90deg, var(--accent-blue), var(--accent-green));
+          transition: width 0.3s ease;
+        }
+
+        .setup-detail {
+          font-size: 10px;
+          color: var(--text-muted);
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
         }
 
         /* Top 3-Tab Bar */
@@ -1725,11 +1937,38 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           flex-direction: column;
           gap: 2px;
           transition: all 0.15s ease;
+          cursor: pointer;
+          user-select: none;
+          position: relative;
         }
 
         .vul-tool-chip:hover {
           border-color: var(--accent-blue);
-          background: rgba(30, 36, 48, 0.5);
+          background: rgba(30, 36, 48, 0.6);
+        }
+
+        .vul-tool-chip.active {
+          border-color: var(--accent-blue);
+          background: rgba(56, 189, 248, 0.18);
+          box-shadow: 0 0 10px rgba(56, 189, 248, 0.35);
+        }
+
+        .vul-tool-chip.active .tool-chip-name {
+          color: var(--accent-blue);
+          font-weight: 700;
+        }
+
+        .vul-tool-chip.active::after {
+          content: "✓ Active";
+          position: absolute;
+          top: 4px;
+          right: 5px;
+          font-size: 8px;
+          font-weight: 700;
+          color: var(--accent-blue);
+          background: rgba(56, 189, 248, 0.15);
+          padding: 1px 4px;
+          border-radius: 3px;
         }
 
         .tool-chip-header {
@@ -1854,7 +2093,40 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       </style>
     </head>
     <body>
+      <!-- Ultra-fast Static Skeleton / Instant Splash Screen -->
+      <div id="instant-splash-loader" class="instant-splash">
+        <div class="splash-content">
+          <div class="splash-logo">
+            <svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+              <path d="M9 12l2 2 4-4"/>
+            </svg>
+          </div>
+          <div class="splash-title">CodeSentinel</div>
+          <div class="splash-sub">Zero-False-Positive Security &amp; AST Code Graph</div>
+          <div class="splash-progress-track">
+            <div class="splash-progress-bar"></div>
+          </div>
+          <div id="splash-status-text" class="splash-status">Bootstrapping security runtime...</div>
+        </div>
+      </div>
+
       <div class="app-container">
+        <!-- Live First-Time Setup & Provisioning Progress Banner -->
+        <div id="setup-progress-banner" class="setup-banner" style="display: none;">
+          <div class="setup-header">
+            <div class="setup-title">
+              <span class="setup-spinner"></span>
+              <span id="setup-progress-title">Setting up runtime tools...</span>
+            </div>
+            <span id="setup-progress-percent" class="setup-pct">0%</span>
+          </div>
+          <div class="setup-bar-track">
+            <div id="setup-bar-fill" class="setup-bar-fill" style="width: 0%;"></div>
+          </div>
+          <div id="setup-progress-detail" class="setup-detail">Initializing self-contained environment...</div>
+        </div>
+
         <!-- Exactly 3 Tabs -->
         <div class="tabs-header">
           <button class="tab-btn active" data-tab="tab-chat" title="Security Agent">
@@ -1971,12 +2243,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           <div id="tab-vuls" class="tab-pane">
             <div class="vul-header-bar">
               <div class="vul-scan-row">
-                <button id="btn-start-vul-scan" class="pill-btn btn-action" style="padding: 6px 12px; font-size: 11px; display: flex; align-items: center; gap: 6px; box-shadow: 0 2px 8px rgba(56, 189, 248, 0.25);">
-                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
-                  </svg>
-                  <span>Scan Entire Project</span>
-                </button>
+                <div style="display: flex; align-items: center; gap: 6px;">
+                  <button id="btn-start-vul-scan" class="pill-btn btn-action" style="padding: 6px 12px; font-size: 11px; display: flex; align-items: center; gap: 6px; box-shadow: 0 2px 8px rgba(56, 189, 248, 0.25);">
+                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+                    </svg>
+                    <span>Scan Entire Project</span>
+                  </button>
+                  <button id="btn-rescan-vul" class="pill-btn" style="display: none; padding: 6px 10px; font-size: 11px; background: rgba(56, 189, 248, 0.15); border-color: var(--accent-blue); color: var(--accent-blue); font-weight: 600;" title="Bypass persistent cache and force a complete fresh multi-engine consensus scan">
+                    🔄 Re-scan
+                  </button>
+                </div>
                 <div class="vul-status-wrapper">
                   <span class="status-dot" id="vul-status-dot" style="background: var(--accent-blue); box-shadow: 0 0 6px rgba(56, 189, 248, 0.6);"></span>
                   <div id="vul-scan-status" class="status-indicator">Ready (4 consensus engines)</div>
@@ -2008,28 +2285,28 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
               <!-- 4-Engine Activity Status Grid -->
               <div class="vul-tools-grid" id="vul-tools-grid">
-                <div class="vul-tool-chip" id="tool-chip-sast" title="Opengrep / Semgrep Multi-Language AST SAST Engine (Zero regex)">
+                <div class="vul-tool-chip" id="tool-chip-sast" title="Opengrep / Semgrep Multi-Language AST SAST Engine — Click to filter findings (click again to unselect)">
                   <div class="tool-chip-header">
                     <span class="tool-chip-icon">🛡️</span>
                     <span class="tool-chip-name">Opengrep AST</span>
                   </div>
                   <div class="tool-chip-stat" id="stat-sast">Idle (0 findings)</div>
                 </div>
-                <div class="vul-tool-chip" id="tool-chip-secrets" title="Gitleaks Dedicated Enterprise Secret & Credential Detector">
+                <div class="vul-tool-chip" id="tool-chip-secrets" title="Gitleaks Dedicated Enterprise Secret Detector — Click to filter findings (click again to unselect)">
                   <div class="tool-chip-header">
                     <span class="tool-chip-icon">🔑</span>
                     <span class="tool-chip-name">Gitleaks Secrets</span>
                   </div>
                   <div class="tool-chip-stat" id="stat-secrets">Idle (0 leaks)</div>
                 </div>
-                <div class="vul-tool-chip" id="tool-chip-atlas" title="Atlas Code Graph AST SQLite Engine & Bandit Python AST Analyzer">
+                <div class="vul-tool-chip" id="tool-chip-atlas" title="Atlas Multi-Language Code Graph AST &amp; Dataflow Security — Click to filter findings (click again to unselect)">
                   <div class="tool-chip-header">
                     <span class="tool-chip-icon">🌐</span>
-                    <span class="tool-chip-name">Atlas AST &amp; Bandit</span>
+                    <span class="tool-chip-name">Atlas AST Graph</span>
                   </div>
                   <div class="tool-chip-stat" id="stat-atlas">Idle (0 risks)</div>
                 </div>
-                <div class="vul-tool-chip" id="tool-chip-manifest" title="Google OSV-Scanner & Native Dependency Advisory Auditor">
+                <div class="vul-tool-chip" id="tool-chip-manifest" title="Google OSV-Scanner &amp; Supply Chain Auditor — Click to filter findings (click again to unselect)">
                   <div class="tool-chip-header">
                     <span class="tool-chip-icon">📦</span>
                     <span class="tool-chip-name">OSV &amp; Supply Chain</span>
@@ -2208,7 +2485,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 </div>
                 <div class="metrics-card full-width">
                   <div class="metric-label">Local SQLite Facts Store</div>
-                  <div class="metric-dbpath" id="metric-db-path">.atlas/atlas.db</div>
+                  <div class="metric-dbpath" id="metric-db-path">.codesentinel/atlas.db</div>
                 </div>
                 <div class="metrics-actions">
                   <button id="btn-metrics-sync" class="btn-primary">⚡ Incremental Sync Graph</button>
@@ -3308,11 +3585,83 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
               }
               break;
             }
+            case 'toolInstallProgress': {
+              const p = msg.progress;
+              if (!p) break;
+              const banner = document.getElementById('setup-progress-banner');
+              const titleEl = document.getElementById('setup-progress-title');
+              const pctEl = document.getElementById('setup-progress-percent');
+              const fillEl = document.getElementById('setup-bar-fill');
+              const detailEl = document.getElementById('setup-progress-detail');
+
+              if (banner) {
+                banner.style.display = 'flex';
+                if (titleEl) titleEl.textContent = p.stage;
+                if (pctEl) pctEl.textContent = p.percent + '%';
+                if (fillEl) fillEl.style.width = p.percent + '%';
+                if (detailEl) detailEl.textContent = p.detail;
+
+                if (p.completed) {
+                  if (pctEl) pctEl.textContent = '100%';
+                  if (fillEl) fillEl.style.width = '100%';
+                  setTimeout(() => {
+                    banner.style.transition = 'opacity 0.6s ease';
+                    banner.style.opacity = '0';
+                    setTimeout(() => {
+                      banner.style.display = 'none';
+                      banner.style.opacity = '1';
+                    }, 600);
+                  }, 2000);
+                }
+              }
+              break;
+            }
+            case 'updateContext': {
+              if (msg.workspace) {
+                const w = msg.workspace;
+                const pathVal = document.querySelector('.path-value');
+                if (pathVal) {
+                  pathVal.textContent = w.rootPath;
+                  pathVal.title = w.rootPath;
+                }
+                const atlasBadge = document.getElementById('badge-atlas-status');
+                if (atlasBadge) {
+                  atlasBadge.className = 'badge ' + (w.hasAtlasDb ? 'badge-success' : 'badge-warn');
+                  atlasBadge.textContent = w.hasAtlasDb ? 'Indexed' : 'Not Indexed';
+                }
+                const mcpBadge = document.getElementById('badge-mcp-status');
+                if (mcpBadge) {
+                  mcpBadge.className = 'badge ' + (w.hasOpenCodeConfig ? 'badge-success' : 'badge-warn');
+                  mcpBadge.textContent = w.hasOpenCodeConfig ? 'Configured' : 'Not Linked';
+                }
+              }
+              if (msg.serverUrl) {
+                const frame = document.getElementById('opencode-frame');
+                if (frame && frame.src !== msg.serverUrl) frame.src = msg.serverUrl;
+              }
+              break;
+            }
+            case 'graphReady': {
+              const atlasBadge = document.getElementById('badge-atlas-status');
+              if (atlasBadge) {
+                atlasBadge.className = 'badge badge-success';
+                atlasBadge.textContent = 'Indexed';
+              }
+              break;
+            }
             case 'vulScanComplete': {
               const containerEl = document.getElementById('vul-progress-container');
               if (containerEl) containerEl.style.display = 'none';
               const statusEl = document.getElementById('vul-scan-status');
-              if (statusEl) statusEl.textContent = 'Scan complete: ' + msg.result.summary.total + ' findings (' + msg.result.scannedFilesCount + ' files)';
+              const rescanBtn = document.getElementById('btn-rescan-vul');
+              if (rescanBtn) rescanBtn.style.display = 'inline-flex';
+              if (statusEl) {
+                if (msg.fromCache) {
+                  statusEl.textContent = 'Cached: ' + msg.result.summary.total + ' findings (' + msg.result.scannedFilesCount + ' files)';
+                } else {
+                  statusEl.textContent = 'Scan complete: ' + msg.result.summary.total + ' findings (' + msg.result.scannedFilesCount + ' files)';
+                }
+              }
               handleVulScanComplete(msg.result);
               break;
             }
@@ -3430,6 +3779,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         // Vulnerability Scanner Client Logic
         let activeScanFindings = [];
         let activeSeverityFilter = 'all';
+        let activeToolFilter = null; // 'sast' | 'secrets' | 'atlas' | 'manifest' | null
         let allScanLogs = [];
         let logFilterWarningsOnly = false;
 
@@ -3580,7 +3930,32 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           if (containerEl) containerEl.style.display = 'block';
           const barEl = document.getElementById('vul-progress-bar');
           if (barEl) barEl.style.width = '5%';
-          vscode.postMessage({ command: 'startVulnerabilityScan' });
+          vscode.postMessage({ command: 'startVulnerabilityScan', forceRefresh: false });
+        });
+
+        document.getElementById('btn-rescan-vul')?.addEventListener('click', () => {
+          allScanLogs = [];
+          const terminalEl = document.getElementById('vul-logs-terminal');
+          if (terminalEl) {
+            terminalEl.style.display = 'flex';
+            terminalEl.innerHTML = '';
+          }
+          const icon = document.getElementById('vul-logs-toggle-icon');
+          if (icon) icon.textContent = '▼';
+          appendVulLog({
+            timestamp: new Date().toLocaleTimeString(),
+            engine: 'PRE-FILTER',
+            level: 'info',
+            message: 'Initiating fresh re-scan (bypassing persistent cache)...'
+          });
+
+          const statusEl = document.getElementById('vul-scan-status');
+          if (statusEl) statusEl.textContent = 'Force re-scanning with 4 consensus engines...';
+          const containerEl = document.getElementById('vul-progress-container');
+          if (containerEl) containerEl.style.display = 'block';
+          const barEl = document.getElementById('vul-progress-bar');
+          if (barEl) barEl.style.width = '5%';
+          vscode.postMessage({ command: 'startVulnerabilityScan', forceRefresh: true });
         });
 
         // Live Search Filter
@@ -3652,10 +4027,56 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           applyVulFilters();
         }
 
+        function toggleToolFilter(toolType) {
+          if (activeToolFilter === toolType) {
+            // Unselect tool filter: restore all tools findings
+            activeToolFilter = null;
+          } else {
+            // Select this tool filter
+            activeToolFilter = toolType;
+          }
+
+          // Toggle .active class on the 4 chips
+          document.getElementById('tool-chip-sast')?.classList.toggle('active', activeToolFilter === 'sast');
+          document.getElementById('tool-chip-secrets')?.classList.toggle('active', activeToolFilter === 'secrets');
+          document.getElementById('tool-chip-atlas')?.classList.toggle('active', activeToolFilter === 'atlas');
+          document.getElementById('tool-chip-manifest')?.classList.toggle('active', activeToolFilter === 'manifest');
+
+          applyVulFilters();
+        }
+
+        // Attach click listeners to all 4 tool status chips
+        document.getElementById('tool-chip-sast')?.addEventListener('click', () => toggleToolFilter('sast'));
+        document.getElementById('tool-chip-secrets')?.addEventListener('click', () => toggleToolFilter('secrets'));
+        document.getElementById('tool-chip-atlas')?.addEventListener('click', () => toggleToolFilter('atlas'));
+        document.getElementById('tool-chip-manifest')?.addEventListener('click', () => toggleToolFilter('manifest'));
+
         function applyVulFilters() {
           const query = (document.getElementById('vul-search-input')?.value || '').toLowerCase().trim();
           const filtered = activeScanFindings.filter(f => {
+            // 1. Severity filter
             if (activeSeverityFilter !== 'all' && f.severity !== activeSeverityFilter) return false;
+
+            // 2. Interactive Tool Chip Filter (Single tool selection or all tools)
+            if (activeToolFilter) {
+              const tools = f.tools || [];
+              const matchesTool = tools.some(t => {
+                const lower = (t || '').toLowerCase();
+                if (activeToolFilter === 'sast') {
+                  return lower.includes('opengrep') || lower.includes('semgrep') || lower.includes('sast');
+                } else if (activeToolFilter === 'secrets') {
+                  return lower.includes('gitleaks') || lower.includes('secret');
+                } else if (activeToolFilter === 'atlas') {
+                  return lower.includes('atlas');
+                } else if (activeToolFilter === 'manifest') {
+                  return lower.includes('osv') || lower.includes('manifest') || lower.includes('npm') || lower.includes('supply') || lower.includes('depend');
+                }
+                return false;
+              });
+              if (!matchesTool) return false;
+            }
+
+            // 3. Search query filter
             if (query) {
               const str = (f.title + ' ' + f.filePath + ' ' + f.cwe + ' ' + f.description).toLowerCase();
               if (!str.includes(query)) return false;
@@ -3671,8 +4092,38 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           listEl.innerHTML = '';
 
           if (findings.length === 0) {
-            listEl.innerHTML = '<div style="text-align: center; padding: 32px 10px; color: var(--text-muted); font-size: 11px;">No matching vulnerabilities found.</div>';
+            if (activeToolFilter) {
+              const toolLabel = activeToolFilter === 'sast' ? 'Opengrep AST' :
+                                activeToolFilter === 'secrets' ? 'Gitleaks Secrets' :
+                                activeToolFilter === 'atlas' ? 'Atlas AST Graph' : 'OSV & Supply Chain';
+              listEl.innerHTML = '<div style="text-align: center; padding: 28px 10px; color: var(--text-muted); font-size: 11px;">' +
+                'No vulnerabilities detected by <strong>' + escapeClientHtml(toolLabel) + '</strong>.' +
+                '<div style="margin-top: 8px;"><button class="pill-btn" id="btn-reset-tool-filter" style="display: inline-block; padding: 3px 8px; font-size: 10px;">Show All Tools Findings</button></div>' +
+                '</div>';
+              listEl.querySelector('#btn-reset-tool-filter')?.addEventListener('click', () => {
+                toggleToolFilter(activeToolFilter);
+              });
+            } else {
+              listEl.innerHTML = '<div style="text-align: center; padding: 32px 10px; color: var(--text-muted); font-size: 11px;">No matching vulnerabilities found.</div>';
+            }
             return;
+          }
+
+          // If a tool filter is currently active, show a top dismissal banner
+          if (activeToolFilter) {
+            const toolLabel = activeToolFilter === 'sast' ? 'Opengrep AST' :
+                              activeToolFilter === 'secrets' ? 'Gitleaks Secrets' :
+                              activeToolFilter === 'atlas' ? 'Atlas AST Graph' : 'OSV & Supply Chain';
+            const banner = document.createElement('div');
+            banner.className = 'reverse-banner';
+            banner.style.marginBottom = '8px';
+            banner.innerHTML = 
+              '<span>Filtered by <strong>' + escapeClientHtml(toolLabel) + '</strong> (' + findings.length + ' findings)</span>' +
+              '<button class="pill-btn" id="btn-clear-active-tool-filter" style="font-size: 9px; padding: 2px 6px; background: rgba(56, 189, 248, 0.2); border-color: var(--accent-blue); color: var(--accent-blue);">✕ Show All Tools</button>';
+            banner.querySelector('#btn-clear-active-tool-filter')?.addEventListener('click', () => {
+              toggleToolFilter(activeToolFilter);
+            });
+            listEl.appendChild(banner);
           }
 
           findings.forEach(f => {
@@ -3682,15 +4133,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
             const toolsHtml = (f.tools || []).map(t => '<span class="vul-badge tools-badge">' + escapeClientHtml(t) + '</span>').join(' ');
 
+            const cegarBadge = f.cegarVerdict === 'CONFIRMED'
+              ? '<span class="vul-badge" style="background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.5);">🛡️ CEGAR: CONFIRMED BUG</span>'
+              : f.cegarVerdict === 'DEFENDED'
+              ? '<span class="vul-badge" style="background: rgba(52, 211, 153, 0.2); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.5);">🛡️ CEGAR: DEFENDED (FP REFUTED)</span>'
+              : f.cegarVerdict === 'CANDIDATE'
+              ? '<span class="vul-badge" style="background: rgba(234, 179, 8, 0.2); color: #facc15; border: 1px solid rgba(234, 179, 8, 0.5);">🛡️ CEGAR: CANDIDATE</span>'
+              : '';
+
             card.innerHTML = 
               '<div class="vul-badge-row">' +
                 '<span class="vul-badge ' + sevClass + '">' + escapeClientHtml(f.severity) + '</span>' +
                 '<span class="vul-badge cwe-badge">' + escapeClientHtml(f.cwe) + '</span>' +
+                cegarBadge +
                 toolsHtml +
               '</div>' +
               '<div class="vul-title">' + escapeClientHtml(f.title) + '</div>' +
               '<div class="vul-loc">📄 ' + escapeClientHtml(f.filePath) + ':' + f.line + '</div>' +
               (f.snippet ? '<div class="vul-code-snippet">' + escapeClientHtml(f.snippet) + '</div>' : '') +
+              (f.cegarProof ? '<div style="margin: 6px 0; padding: 6px 8px; font-size: 10px; border-radius: 4px; background: rgba(56, 189, 248, 0.08); border-left: 3px solid var(--accent-blue); color: var(--text-main);"><strong style="color: var(--accent-blue);">🛡️ Invariant Proof:</strong> ' + escapeClientHtml(f.cegarProof) + '</div>' : '') +
               '<div class="vul-desc">' + escapeClientHtml(f.description) + '</div>' +
               (f.remediation ? '<div class="vul-remediation"><strong>Fix:</strong> ' + escapeClientHtml(f.remediation) + '</div>' : '') +
               '<div class="vul-card-footer">' +
@@ -3741,6 +4202,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           graphInitialized = true;
           vscode.postMessage({ command: 'getGraphData' });
         }
+
+        // Instantly transition out the static splash screen once initial interactive DOM is ready
+        setTimeout(() => {
+          const splash = document.getElementById('instant-splash-loader');
+          if (splash) splash.classList.add('hidden');
+        }, 300);
       </script>
     </body>
     </html>`;

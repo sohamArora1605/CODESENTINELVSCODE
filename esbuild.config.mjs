@@ -74,6 +74,23 @@ async function build() {
     await testCtx.dispose();
   }
 
+  // 5. Benchmark Runner bundle
+  if (fs.existsSync("benchmark/run_benchmark.ts")) {
+    const benchCtx = await esbuild.context({
+      entryPoints: ["benchmark/run_benchmark.ts"],
+      bundle: true,
+      format: "cjs",
+      minify: false,
+      sourcemap: true,
+      platform: "node",
+      outfile: "dist/benchmark/run_benchmark.js",
+      external: ["vscode"],
+      logLevel: "info",
+    });
+    await benchCtx.rebuild();
+    await benchCtx.dispose();
+  }
+
   await extensionCtx.dispose();
   await mcpServerCtx.dispose();
   console.log("CodeSentinel bundles built successfully.");

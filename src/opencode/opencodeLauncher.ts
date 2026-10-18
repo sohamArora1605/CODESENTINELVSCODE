@@ -88,9 +88,9 @@ export class OpenCodeLauncher {
       path.resolve(process.cwd(), "resources", "skills"),
     ].filter((p): p is string => Boolean(p && fs.existsSync(p)));
 
-    const targetWorkspaceSkillsDir = path.join(workspaceRoot, ".opencode", "skills");
     const homedir = os.homedir();
     const targetGlobalSkillsDir = homedir ? path.join(homedir, ".opencode", "skills") : null;
+    const targetWorkspaceSkillsDir = path.join(workspaceRoot, ".codesentinel", "skills");
 
     if (candidateDirs.length === 0) {
       return { workspaceSkillPath: targetWorkspaceSkillsDir };
@@ -126,20 +126,20 @@ export class OpenCodeLauncher {
       }
     };
 
-    // 1. Copy to workspace .opencode/skills/
-    try {
-      copyDirRecursive(sourceSkillsDir, targetWorkspaceSkillsDir);
-    } catch (e: any) {
-      console.warn(`CodeSentinel: Failed to copy skills to workspace: ${e.message}`);
-    }
-
-    // 2. Also copy to global user ~/.opencode/skills/
+    // 1. Primary: Copy to global user ~/.opencode/skills/ (zero workspace pollution, discovered by OpenCode globally)
     if (targetGlobalSkillsDir) {
       try {
         copyDirRecursive(sourceSkillsDir, targetGlobalSkillsDir);
       } catch (e: any) {
         console.warn(`CodeSentinel: Failed to copy skills to global ~/.opencode: ${e.message}`);
       }
+    }
+
+    // 2. Also keep a copy in workspace .codesentinel/skills/
+    try {
+      copyDirRecursive(sourceSkillsDir, targetWorkspaceSkillsDir);
+    } catch (e: any) {
+      console.warn(`CodeSentinel: Failed to copy skills to .codesentinel: ${e.message}`);
     }
 
     return {
@@ -151,7 +151,7 @@ export class OpenCodeLauncher {
   public async syncWorkspaceConfig(
     workspaceRoot: string,
     mcpServerScriptPath: string,
-    options?: { useDocker?: boolean; imageName?: string; extensionPath?: string }
+    options?: { useDocker?: boolean; imageName?: string; extensionPath?: string; timeout?: number }
   ): Promise<string> {
     // Auto-provision bundled skills into the workspace and user global config
     const extensionRoot = options?.extensionPath || path.resolve(path.dirname(mcpServerScriptPath), "..");
@@ -177,6 +177,21 @@ export class OpenCodeLauncher {
       }
     }
 
+    // Read configured MCP timeout (default: 600,000ms / 10 minutes)
+    let mcpTimeoutMs = 600000;
+    try {
+      const config = vscode.workspace.getConfiguration("codesentinel");
+      mcpTimeoutMs = options?.timeout ?? config.get<number>("mcpTimeout", 600000);
+    } catch {}
+
+    // Configure global OpenCode MCP timeouts:
+    // startup: 60s, catalog: 60s, execution: 10m (600,000ms) for heavy security scans
+    currentConfig.mcp["timeout"] = {
+      startup: 60000,
+      catalog: 60000,
+      execution: mcpTimeoutMs,
+    };
+
     // Normalize path with forward slashes for cross-platform Docker mount compatibility
     const normalizedMount = workspaceRoot.replace(/\\/g, "/");
 
@@ -200,6 +215,7 @@ export class OpenCodeLauncher {
           "/app/dist/mcp-server.js",
         ],
         enabled: true,
+        timeout: mcpTimeoutMs,
         environment: {
           CODESENTINEL_WORKSPACE: "/workspace",
         },
@@ -209,6 +225,7 @@ export class OpenCodeLauncher {
         type: "local",
         command: ["node", mcpServerScriptPath.replace(/\\/g, "/")],
         enabled: true,
+        timeout: mcpTimeoutMs,
         environment: {
           CODESENTINEL_WORKSPACE: workspaceRoot,
         },
@@ -230,6 +247,7 @@ export class OpenCodeLauncher {
         normalizedMount,
       ],
       enabled: true,
+      timeout: mcpTimeoutMs,
       environment: {
         CODESENTINEL_WORKSPACE: workspaceRoot,
       },
@@ -258,6 +276,7 @@ export class OpenCodeLauncher {
       "**/Pods/**",
       "**/.cargo/**",
       "**/.atlas/**",
+      "**/.codesentinel/**",
 
       // Version control & IDE meta
       "**/.git/**",
@@ -357,25 +376,36 @@ export class OpenCodeLauncher {
 
   public async indexWithAtlas(workspaceRoot: string): Promise<{ success: boolean; output: string }> {
     try {
-      const dbPath = path.join(workspaceRoot, ".atlas", "atlas.db");
+      const sentinelDir = path.join(workspaceRoot, ".codesentinel");
+      if (!fs.existsSync(sentinelDir)) {
+        try { fs.mkdirSync(sentinelDir, { recursive: true }); } catch {}
+      }
+      const sentinelGitignore = path.join(sentinelDir, ".gitignore");
+      if (!fs.existsSync(sentinelGitignore)) {
+        try { fs.writeFileSync(sentinelGitignore, "*\n", "utf-8"); } catch {}
+      }
+
+      const sentinelDb = path.join(sentinelDir, "atlas.db");
+      const legacyDb = path.join(workspaceRoot, ".atlas", "atlas.db");
+      const dbToCheck = fs.existsSync(sentinelDb) ? sentinelDb : legacyDb;
 
       // Auto-heal: verify SQLite header and delete corrupt / non-database file if damaged
-      if (fs.existsSync(dbPath)) {
+      if (fs.existsSync(dbToCheck)) {
         try {
-          const stats = fs.statSync(dbPath);
+          const stats = fs.statSync(dbToCheck);
           if (stats.size < 100) {
-            fs.unlinkSync(dbPath);
+            fs.unlinkSync(dbToCheck);
           } else {
-            const fd = fs.openSync(dbPath, "r");
+            const fd = fs.openSync(dbToCheck, "r");
             const buf = Buffer.alloc(16);
             fs.readSync(fd, buf, 0, 16, 0);
             fs.closeSync(fd);
             if (!buf.toString("utf8").startsWith("SQLite format 3")) {
-              fs.unlinkSync(dbPath);
+              fs.unlinkSync(dbToCheck);
             }
           }
         } catch {
-          try { fs.unlinkSync(dbPath); } catch {}
+          try { fs.unlinkSync(dbToCheck); } catch {}
         }
       }
 
@@ -397,6 +427,22 @@ export class OpenCodeLauncher {
         timeout: 180000,
         env,
       });
+
+      // Relocate .atlas/atlas.db into .codesentinel/atlas.db to prevent workspace pollution
+      const generatedAtlasDb = path.join(workspaceRoot, ".atlas", "atlas.db");
+      if (fs.existsSync(generatedAtlasDb)) {
+        try {
+          fs.copyFileSync(generatedAtlasDb, sentinelDb);
+          fs.unlinkSync(generatedAtlasDb);
+          const atlasDir = path.join(workspaceRoot, ".atlas");
+          if (fs.existsSync(atlasDir)) {
+            try { fs.rmdirSync(atlasDir); } catch {}
+          }
+        } catch (moveErr: any) {
+          console.warn("Notice relocating atlas.db into .codesentinel:", moveErr?.message);
+        }
+      }
+
       return { success: true, output: hostOut || hostErr };
     } catch (err: any) {
       return { success: false, output: err.message };

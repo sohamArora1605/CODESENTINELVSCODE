@@ -4,6 +4,7 @@ import { testMcpServer } from "./mcpServer.test";
 import { testDockerClient } from "./dockerClient.test";
 import { testGraphService } from "./graphService.test";
 import { testVulnerabilityScanner } from "./vulnerabilityScanner.test";
+import { testCegarVerifier } from "./cegarVerifier.test";
 
 async function runAllTests() {
   console.log("==========================================");
@@ -19,6 +20,7 @@ async function runAllTests() {
     { name: "DockerClient", fn: testDockerClient },
     { name: "GraphService", fn: testGraphService },
     { name: "VulnerabilityScanner", fn: testVulnerabilityScanner },
+    { name: "CegarVerifier", fn: testCegarVerifier },
   ];
 
   for (const suite of suites) {

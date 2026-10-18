@@ -1,28 +1,35 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
+    "timeout": {
+      "startup": 60000,
+      "catalog": 60000,
+      "execution": 600000
+    },
     "codesentinel": {
       "type": "local",
       "command": [
         "node",
-        "d:/CODESENTINELVSCODE/dist/mcp-server.js"
+        "c:/Users/Soham/.antigravity-ide/extensions/codesentinel.codesentinel-0.1.0/dist/mcp-server.js"
       ],
       "enabled": true,
+      "timeout": 600000,
       "environment": {
-        "CODESENTINEL_WORKSPACE": "D:/CODESENTINELVSCODE"
+        "CODESENTINEL_WORKSPACE": "d:\\CODESENTINELVSCODE"
       }
     },
     "atlas": {
       "type": "local",
       "command": [
         "node",
-        "d:/CODESENTINELVSCODE/dist/atlas-bridge.js",
+        "c:/Users/Soham/.antigravity-ide/extensions/codesentinel.codesentinel-0.1.0/dist/atlas-bridge.js",
         "local",
         "d:/CODESENTINELVSCODE"
       ],
       "enabled": true,
+      "timeout": 600000,
       "environment": {
-        "CODESENTINEL_WORKSPACE": "D:/CODESENTINELVSCODE"
+        "CODESENTINEL_WORKSPACE": "d:\\CODESENTINELVSCODE"
       }
     }
   }

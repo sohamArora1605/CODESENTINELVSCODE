@@ -4,6 +4,25 @@
   "description": "Multi-language Static Application Security Testing (SAST) & Agentic Security Auditor with MCP & OpenCode integration",
   "version": "0.1.0",
   "publisher": "codesentinel",
+  "license": "MIT",
+  "icon": "resources/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/codesentinel/codesentinel-vscode"
+  },
+  "keywords": [
+    "security",
+    "sast",
+    "vulnerability",
+    "scanner",
+    "secrets",
+    "opengrep",
+    "gitleaks",
+    "osv",
+    "agentic",
+    "ai",
+    "mcp"
+  ],
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -118,11 +137,6 @@
           "default": "local",
           "description": "Backend execution mode: local self-contained runtime or remote cloud endpoint."
         },
-        "codesentinel.dockerImage": {
-          "type": "string",
-          "default": "codesentinel/core:latest",
-          "description": "Docker container image used for hermetic scanner operations."
-        },
         "codesentinel.cloudEndpoint": {
           "type": "string",
           "default": "https://api.codesentinel.io/v1",
@@ -142,6 +156,11 @@
           "type": "boolean",
           "default": true,
           "description": "Automatically provision the Cloud Security Audit skill to OpenCode (.opencode/skills/cloud-security-audit) upon workspace load."
+        },
+        "codesentinel.mcpTimeout": {
+          "type": "number",
+          "default": 600000,
+          "description": "Maximum per-tool execution timeout in milliseconds for OpenCode MCP tools (default: 600000ms / 10 minutes)."
         }
       }
     }
@@ -152,7 +171,9 @@
     "watch": "tsc -watch -p ./",
     "build": "node esbuild.config.mjs --production",
     "build:dev": "node esbuild.config.mjs",
-    "test": "node dist/test/runner.js"
+    "test": "node dist/test/runner.js",
+    "package": "npm run build && npx -y @vscode/vsce package --no-dependencies",
+    "publish": "npm run build && npx -y @vscode/vsce publish --no-dependencies"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.18.0",
@@ -163,6 +184,7 @@
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^4.0.0",
     "esbuild": "^0.23.0",
     "typescript": "^5.5.4"
   }
