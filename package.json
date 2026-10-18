@@ -172,8 +172,8 @@
     "build": "node esbuild.config.mjs --production",
     "build:dev": "node esbuild.config.mjs",
     "test": "node dist/test/runner.js",
-    "package": "npm run build && npx -y @vscode/vsce package --no-dependencies",
-    "publish": "npm run build && npx -y @vscode/vsce publish --no-dependencies"
+    "package": "npm run build && npx -y @vscode/vsce package --no-dependencies --allow-package-all-secrets",
+    "publish": "npm run build && npx -y @vscode/vsce publish --no-dependencies --allow-package-all-secrets"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.18.0",

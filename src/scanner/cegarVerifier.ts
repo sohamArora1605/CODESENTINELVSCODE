@@ -414,14 +414,24 @@ export class CegarVerifier {
       if (!isTempFile && this.opengrepCache.has(targetFilePath)) {
         results = this.opengrepCache.get(targetFilePath)!;
       } else {
-        const cmd = `"${opengrepPath}" scan --config p/security-audit --taint-intrafile --quiet --json "${targetFilePath}"`;
+        const localAuditRule = toolManager.getLocalRulePath("security-audit");
+        const configArg = localAuditRule ? `"${localAuditRule}"` : "p/security-audit";
+        const cmd = `"${opengrepPath}" scan --config ${configArg} --taint-intrafile --quiet --json "${targetFilePath}"`;
         let stdout = "";
         try {
-          const res = await execAsync(cmd, { cwd: workspaceRoot, maxBuffer: 10 * 1024 * 1024 });
+          const res = await execAsync(cmd, { cwd: workspaceRoot, maxBuffer: 10 * 1024 * 1024, timeout: 35000 });
           stdout = res.stdout;
         } catch (err: any) {
           if (err.stdout) {
             stdout = err.stdout;
+          } else if (configArg !== "p/security-audit") {
+            try {
+              const res2 = await execAsync(`"${opengrepPath}" scan --config p/security-audit --taint-intrafile --quiet --json "${targetFilePath}"`, { cwd: workspaceRoot, maxBuffer: 10 * 1024 * 1024, timeout: 35000 });
+              stdout = res2.stdout;
+            } catch (err2: any) {
+              if (err2.stdout) stdout = err2.stdout;
+              else return null;
+            }
           } else {
             return null;
           }

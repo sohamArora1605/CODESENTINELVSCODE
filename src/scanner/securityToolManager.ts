@@ -51,6 +51,59 @@ export class SecurityToolManager {
     return this.binDir;
   }
 
+  public getRulesDir(): string {
+    const rulesDir = path.join(this.storagePath, "rules");
+    if (!fs.existsSync(rulesDir)) {
+      try {
+        fs.mkdirSync(rulesDir, { recursive: true });
+      } catch {}
+    }
+    return rulesDir;
+  }
+
+  /**
+   * Retrieves local offline path for a bundled/cached Semgrep/Opengrep registry rule pack.
+   * Copies bundled rules from extension resources/rules/ to ~/.codesentinel/rules/ if missing.
+   */
+  public getLocalRulePath(ruleName: "default" | "security-audit"): string | null {
+    const fileName = `semgrep-${ruleName}.json`;
+    const targetPath = path.join(this.getRulesDir(), fileName);
+
+    // 1. If already present in user storage ~/.codesentinel/rules/, verify non-empty and return
+    if (fs.existsSync(targetPath)) {
+      try {
+        if (fs.statSync(targetPath).size > 1000) return targetPath;
+      } catch {}
+    }
+
+    // 2. Look for bundled rules inside extension resources/rules/
+    const candidatePaths = [
+      path.join(__dirname, "..", "..", "resources", "rules", fileName),
+      path.join(__dirname, "..", "resources", "rules", fileName),
+      path.join(__dirname, "resources", "rules", fileName),
+      path.resolve(__dirname, "..", "..", "resources", "rules", fileName),
+      path.resolve("resources", "rules", fileName),
+      path.join("D:\\CODESENTINELVSCODE", "resources", "rules", fileName),
+    ];
+
+    for (const cand of candidatePaths) {
+      if (fs.existsSync(cand)) {
+        try {
+          if (fs.statSync(cand).size > 1000) {
+            try {
+              fs.copyFileSync(cand, targetPath);
+              return targetPath;
+            } catch {
+              return cand;
+            }
+          }
+        } catch {}
+      }
+    }
+
+    return fs.existsSync(targetPath) ? targetPath : null;
+  }
+
   /**
    * Helper to download remote file with redirect following, timeout, and live progress logging.
    */
@@ -186,6 +239,12 @@ export class SecurityToolManager {
    * into the self-contained extension bin directory.
    */
   public async ensureSecurityTools(onLog?: (msg: string) => void): Promise<InstalledToolPaths> {
+    // Prime local offline Semgrep/Opengrep rulesets into ~/.codesentinel/rules/
+    try {
+      this.getLocalRulePath("default");
+      this.getLocalRulePath("security-audit");
+    } catch {}
+
     const [opengrep, gitleaks, osv] = await Promise.allSettled([
       this.getOpengrepPath(onLog),
       this.getGitleaksPath(onLog),
@@ -647,6 +706,8 @@ ${pathLines}
       "target/",
       ".atlas/",
       ".vscode/",
+      ".codesentinel/",
+      "resources/rules/",
       "coverage/",
       "*.min.js",
       "*.map",
@@ -679,6 +740,9 @@ ${pathLines}
    * Execute Opengrep / Semgrep AST engine against the entire workspace directory
    * in a SINGLE pass, using a .semgrepignore file to let the native OCaml engine
    * skip all excluded directories without per-file filtering overhead.
+   *
+   * Primary: Runs official community p/security-audit (with taint tracking) and p/default registry rulesets.
+   * Fallback: If remote registry download fails or is offline, automatically falls back to local full registry rule packs.
    */
   public async runOpengrep(
     workspaceRoot: string,
@@ -693,7 +757,8 @@ ${pathLines}
       return findings;
     }
 
-    const binDir = this.getBinDir();
+    const localAuditRule = this.getLocalRulePath("security-audit");
+    const localDefaultRule = this.getLocalRulePath("default");
     let semgrepignorePath = "";
 
     // Build a Set for post-scan filtering
@@ -719,7 +784,7 @@ ${pathLines}
           const normalizedFull = path.normalize(fullItemPath).toLowerCase().replace(/\\/g, "/");
           const relNorm = path.relative(workspaceRoot, fullItemPath).toLowerCase().replace(/\\/g, "/");
 
-          // Hard post-filter: never report findings in excluded dirs
+          // Hard post-filter: never report findings in excluded or internal rule dirs
           if (
             normalizedFull.includes("/node_modules/") ||
             normalizedFull.includes("/.opencode/") ||
@@ -728,14 +793,20 @@ ${pathLines}
             normalizedFull.includes("/build/") ||
             normalizedFull.includes("/vendor/") ||
             normalizedFull.includes("/.venv/") ||
-            normalizedFull.includes("/venv/")
+            normalizedFull.includes("/venv/") ||
+            normalizedFull.includes("/resources/rules/") ||
+            normalizedFull.includes("/.codesentinel/")
           ) {
             continue;
           }
 
-          // Enforce scannable files membership (check normalized full path or relative path)
-          if (scannableSet.size > 0 && !scannableSet.has(normalizedFull) && !scannableSet.has(relNorm)) {
-            continue;
+          // Enforce scannable files membership (skip if not in scannableSet and file is non-source or ignored)
+          const cleanRelNorm = relNorm.replace(/^\.\//, "");
+          if (scannableSet.size > 0 && !scannableSet.has(normalizedFull) && !scannableSet.has(relNorm) && !scannableSet.has(cleanRelNorm)) {
+            const ext = path.extname(normalizedFull);
+            if ([".json", ".md", ".log", ".tmp", ".txt", ".map"].includes(ext)) {
+              continue;
+            }
           }
 
           const rawCheckId = r.check_id || r.rule_id || "AST-FINDING";
@@ -766,6 +837,12 @@ ${pathLines}
             ? `Review code according to security best practice. Reference: ${references}`
             : (extra.fix || "Refactor code to sanitize untrusted input and use safe APIs.");
 
+          // Avoid duplicate findings on same line and rule
+          const alreadyExists = findings.some(
+            (f) => f.filePath === filePath && f.line === startLine && f.cwe === cwe
+          );
+          if (alreadyExists) continue;
+
           findings.push({
             id: `OPENGREP-${checkId}-${findings.length + 1}`,
             tool: "Opengrep AST Engine",
@@ -788,59 +865,92 @@ ${pathLines}
       // Write .semgrepignore so native engine handles traversal exclusions across all languages
       semgrepignorePath = this.writeSemgrepignore(workspaceRoot, gitignoreRules || []);
 
-      onLog(`Running Opengrep AST single-pass workspace scan with all built-in security rules...`);
+      let auditRan = false;
+      let defaultRan = false;
 
-      let scannedOk = false;
-
-      // 1. Primary: Run with --config auto which uses ALL built-in rules (secrets, injection, crypto, etc.)
-      //    This is the most comprehensive config and works offline without registry access.
-      try {
-        const cmd = `"${opengrepCmd}" scan --config auto --quiet --json "."`;
-        const { stdout } = await execAsync(cmd, { cwd: workspaceRoot, maxBuffer: 30 * 1024 * 1024, timeout: 120000 });
-        parseAndAddResults(stdout);
-        scannedOk = true;
-        onLog(`Opengrep auto-config scan complete: ${findings.length} finding(s) from built-in rules.`);
-      } catch (autoErr: any) {
-        if (autoErr.stdout && autoErr.stdout.trim().startsWith("{")) {
-          parseAndAddResults(autoErr.stdout);
-          scannedOk = true;
-          onLog(`Opengrep auto-config scan complete (with warnings): ${findings.length} finding(s).`);
-        } else {
-          onLog(`Opengrep auto-config notice: ${autoErr.message}. Trying registry rulesets...`);
-        }
-      }
-
-      // 2. Supplemental: Also run p/security-audit for additional taint-tracking rules from the registry
-      //    Results are merged and deduplicated with the auto scan results.
-      const priorCount = findings.length;
+      // -----------------------------------------------------------------------
+      // Phase 1: Security Audit Scan (Taint Tracking & High-Severity Sinks)
+      // -----------------------------------------------------------------------
+      onLog("Running Opengrep AST security-audit scan (taint tracking)...");
       try {
         const cmd = `"${opengrepCmd}" scan --config p/security-audit --taint-intrafile --quiet --json "."`;
-        const { stdout } = await execAsync(cmd, { cwd: workspaceRoot, maxBuffer: 30 * 1024 * 1024, timeout: 120000 });
+        const { stdout } = await execAsync(cmd, { cwd: workspaceRoot, maxBuffer: 30 * 1024 * 1024, timeout: 35000 });
         parseAndAddResults(stdout);
-        scannedOk = true;
-        const newFindings = findings.length - priorCount;
-        if (newFindings > 0) {
-          onLog(`Opengrep security-audit registry scan added ${newFindings} additional finding(s).`);
-        }
+        auditRan = true;
+        onLog(`Opengrep security-audit registry scan complete: ${findings.length} finding(s) detected.`);
       } catch (regErr: any) {
         if (regErr.stdout && regErr.stdout.trim().startsWith("{")) {
           parseAndAddResults(regErr.stdout);
-          scannedOk = true;
+          auditRan = true;
         }
-        // Registry rules may fail offline — that's OK, auto scan already ran
       }
 
-      // 3. Final fallback: If neither auto nor registry worked, try p/default
-      if (!scannedOk) {
+      // 1b. If remote registry was unreachable or offline, automatically use local offline security-audit rule pack
+      if (!auditRan && localAuditRule) {
         try {
-          const cmd = `"${opengrepCmd}" scan --config p/default --quiet --json "."`;
+          onLog("Remote registry unreachable or offline; using local cached security-audit ruleset fallback...");
+          const cmd = `"${opengrepCmd}" scan --config "${localAuditRule}" --taint-intrafile --quiet --json "."`;
           const { stdout } = await execAsync(cmd, { cwd: workspaceRoot, maxBuffer: 30 * 1024 * 1024, timeout: 120000 });
           parseAndAddResults(stdout);
-          scannedOk = true;
-        } catch (fbErr: any) {
-          if (fbErr.stdout && fbErr.stdout.trim().startsWith("{")) {
-            parseAndAddResults(fbErr.stdout);
-            scannedOk = true;
+          auditRan = true;
+          onLog(`Opengrep local security-audit fallback scan complete: ${findings.length} finding(s) detected.`);
+        } catch (locErr: any) {
+          if (locErr.stdout && locErr.stdout.trim().startsWith("{")) {
+            parseAndAddResults(locErr.stdout);
+            auditRan = true;
+          }
+        }
+      }
+
+      // -----------------------------------------------------------------------
+      // Phase 2: Comprehensive Multi-Language Default Ruleset Scan
+      // -----------------------------------------------------------------------
+      onLog("Running Opengrep AST multi-language default ruleset scan...");
+      const priorCount = findings.length;
+      try {
+        const cmd = `"${opengrepCmd}" scan --config p/default --quiet --json "."`;
+        const { stdout } = await execAsync(cmd, { cwd: workspaceRoot, maxBuffer: 30 * 1024 * 1024, timeout: 35000 });
+        parseAndAddResults(stdout);
+        defaultRan = true;
+        const newFindings = findings.length - priorCount;
+        onLog(`Opengrep default registry scan complete: added ${newFindings} finding(s).`);
+      } catch (defErr: any) {
+        if (defErr.stdout && defErr.stdout.trim().startsWith("{")) {
+          parseAndAddResults(defErr.stdout);
+          defaultRan = true;
+        }
+      }
+
+      // 2b. If remote p/default was unreachable or offline, automatically use local offline default rule pack
+      if (!defaultRan && localDefaultRule) {
+        try {
+          onLog("Remote default registry unreachable or offline; using local cached default ruleset fallback...");
+          const cmd = `"${opengrepCmd}" scan --config "${localDefaultRule}" --quiet --json "."`;
+          const { stdout } = await execAsync(cmd, { cwd: workspaceRoot, maxBuffer: 30 * 1024 * 1024, timeout: 120000 });
+          parseAndAddResults(stdout);
+          defaultRan = true;
+          const newFindings = findings.length - priorCount;
+          onLog(`Opengrep local default fallback scan complete: added ${newFindings} finding(s).`);
+        } catch (locDefErr: any) {
+          if (locDefErr.stdout && locDefErr.stdout.trim().startsWith("{")) {
+            parseAndAddResults(locDefErr.stdout);
+            defaultRan = true;
+          }
+        }
+      }
+
+      // -----------------------------------------------------------------------
+      // Phase 3: Final safety net: If neither remote nor local rulesets executed, run --config auto
+      // -----------------------------------------------------------------------
+      if (!auditRan && !defaultRan) {
+        try {
+          onLog("Using Opengrep built-in auto ruleset fallback...");
+          const cmd = `"${opengrepCmd}" scan --config auto --quiet --json "."`;
+          const { stdout } = await execAsync(cmd, { cwd: workspaceRoot, maxBuffer: 30 * 1024 * 1024, timeout: 120000 });
+          parseAndAddResults(stdout);
+        } catch (autoErr: any) {
+          if (autoErr.stdout && autoErr.stdout.trim().startsWith("{")) {
+            parseAndAddResults(autoErr.stdout);
           }
         }
       }
