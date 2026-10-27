@@ -4,7 +4,7 @@ import * as fs from "fs";
 import { CodeSentinelMcpServer } from "./mcpServer";
 
 async function main() {
-  const server = new CodeSentinelMcpServer("codesentinel-standalone", "0.1.0");
+  const server = new CodeSentinelMcpServer("codesentinel-standalone", "0.2.0");
 
   server.setWorkspaceContextResolver(() => {
     const root = process.env.CODESENTINEL_WORKSPACE || process.cwd();

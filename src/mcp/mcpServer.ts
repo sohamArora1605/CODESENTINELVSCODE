@@ -27,7 +27,7 @@ export class CodeSentinelMcpServer {
   private tools: Map<string, RegisteredTool> = new Map();
   private getActiveWorkspaceFn?: () => WorkspaceContext | null;
 
-  constructor(serverName = "codesentinel-mcp", version = "0.1.0") {
+  constructor(serverName = "codesentinel-mcp", version = "0.2.0") {
     this.server = new Server(
       {
         name: serverName,

@@ -26,7 +26,7 @@ export function activate(context: vscode.ExtensionContext) {
   workspaceManager.registerWatchers(context);
 
   const opencodeLauncher = OpenCodeLauncher.getInstance();
-  const mcpServer = new CodeSentinelMcpServer("codesentinel-internal", "0.1.0");
+  const mcpServer = new CodeSentinelMcpServer("codesentinel-internal", "0.2.0");
   mcpServer.setWorkspaceContextResolver(() => workspaceManager.getContext());
 
   // Register Webview View Provider for Activity Bar Sidebar
