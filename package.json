@@ -2,7 +2,7 @@
   "name": "codesentinel",
   "displayName": "CodeSentinel Security Scanner",
   "description": "Multi-language Static Application Security Testing (SAST) & Agentic Security Auditor with MCP & OpenCode integration",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "publisher": "codesentinel",
   "license": "MIT",
   "icon": "resources/icon.png",

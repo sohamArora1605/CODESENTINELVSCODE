@@ -35,26 +35,34 @@ export class WorkspaceManager {
 
   public refreshContext(preferredUri?: vscode.Uri): WorkspaceContext | null {
     const folders = vscode.workspace.workspaceFolders;
-    if (!folders || folders.length === 0) {
+    let targetFolder: vscode.WorkspaceFolder | null = folders && folders.length > 0 ? folders[0] : null;
+    let externalRoot: string | null = null; // root outside VS Code workspace folders
+
+    const candidateUri = preferredUri || vscode.window.activeTextEditor?.document?.uri;
+    if (candidateUri && candidateUri.scheme === "file") {
+      const match = vscode.workspace.getWorkspaceFolder(candidateUri);
+      if (match) {
+        targetFolder = match;
+      } else {
+        // Active file is outside all open workspace folders — detect its project root or directory
+        externalRoot = this.findProjectRoot(candidateUri.fsPath);
+      }
+    }
+
+    // If the active file lives in an external project/folder, use that directly
+    const rootPath = externalRoot || (targetFolder ? targetFolder.uri.fsPath : null);
+    if (!rootPath) {
       this.currentContext = null;
       this.onWorkspaceChangeEmitter.fire(null);
       return null;
     }
 
-    let targetFolder: vscode.WorkspaceFolder = folders[0];
-    if (preferredUri) {
-      const match = vscode.workspace.getWorkspaceFolder(preferredUri);
-      if (match) {
-        targetFolder = match;
-      }
-    } else if (vscode.window.activeTextEditor) {
-      const match = vscode.workspace.getWorkspaceFolder(vscode.window.activeTextEditor.document.uri);
-      if (match) {
-        targetFolder = match;
-      }
-    }
+    const folderName = externalRoot
+      ? path.basename(externalRoot)
+      : targetFolder
+      ? targetFolder.name
+      : path.basename(rootPath);
 
-    const rootPath = targetFolder.uri.fsPath;
     const detectedLanguages = this.detectWorkspaceLanguages(rootPath);
     const hasGit = fs.existsSync(path.join(rootPath, ".git"));
     const hasOpenCodeConfig =
@@ -62,20 +70,20 @@ export class WorkspaceManager {
       fs.existsSync(path.join(rootPath, ".opencode", "config.json")) ||
       fs.existsSync(path.join(rootPath, ".opencode"));
 
-    const activeFilePath = vscode.window.activeTextEditor?.document.uri.fsPath;
+    const activeFilePath = vscode.window.activeTextEditor?.document?.uri?.fsPath;
 
     const previous = this.currentContext;
     const hasChanged =
       !previous ||
       previous.rootPath !== rootPath ||
-      previous.name !== targetFolder.name ||
+      previous.name !== folderName ||
       previous.hasGit !== hasGit ||
       previous.hasOpenCodeConfig !== hasOpenCodeConfig ||
       previous.detectedLanguages.join(",") !== detectedLanguages.join(",");
 
     this.currentContext = {
       rootPath,
-      name: targetFolder.name,
+      name: folderName,
       detectedLanguages,
       hasGit,
       hasOpenCodeConfig,
@@ -108,6 +116,64 @@ export class WorkspaceManager {
       throw new Error("No active workspace folder open. Open a project repository first.");
     }
     return path.resolve(root, relativePath);
+  }
+
+  /**
+   * Walk up the directory tree from `startPath` to find the nearest project root.
+   * Recognises: .git, package.json, pyproject.toml, go.mod, Cargo.toml, pom.xml,
+   * CMakeLists.txt, build.gradle — stops at the filesystem root.
+   * If no project marker is found, safely falls back to the directory containing startPath.
+   */
+  private findProjectRoot(startPath: string): string | null {
+    if (!startPath || typeof startPath !== "string") {
+      return null;
+    }
+
+    let dir: string;
+    try {
+      if (!fs.existsSync(startPath)) {
+        return null;
+      }
+      const stat = fs.statSync(startPath);
+      dir = stat.isDirectory() ? startPath : path.dirname(startPath);
+    } catch {
+      return null;
+    }
+
+    const fallbackDir = dir;
+    const projectMarkers = [
+      ".git",
+      "package.json",
+      "pyproject.toml",
+      "go.mod",
+      "Cargo.toml",
+      "pom.xml",
+      "CMakeLists.txt",
+      "build.gradle",
+      "build.gradle.kts",
+      ".opencode",
+      "opencode.json",
+    ];
+
+    try {
+      const parsedRoot = path.parse(dir).root;
+
+      while (dir && dir !== parsedRoot) {
+        for (const marker of projectMarkers) {
+          try {
+            if (fs.existsSync(path.join(dir, marker))) {
+              return dir;
+            }
+          } catch {}
+        }
+        const parent = path.dirname(dir);
+        if (parent === dir) break; // reached filesystem root
+        dir = parent;
+      }
+    } catch {}
+
+    // Fall back to the immediate folder containing the file rather than remote workspace folder
+    return fallbackDir;
   }
 
   private detectWorkspaceLanguages(rootPath: string): string[] {

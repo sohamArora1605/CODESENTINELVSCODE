@@ -563,13 +563,11 @@ ${pathLines}
     try {
       onLog(`Running Gitleaks bulk directory scan with full built-in detection ruleset...`);
 
-      // Write a TOML config that EXTENDS the default ruleset (keeping all 150+ rules)
-      // while adding path exclusions for node_modules, .git, dist, etc.
-      // Without this, gitleaks scans ALL files including node_modules and hangs.
-      const tomlContent = `[extend]
-  useDefault = true
-
-` + this.buildGitleaksToml(gitignoreRules || []);
+      // Write a TOML allowlist config with path exclusions for node_modules, .git, dist, etc.
+      // A config with ONLY [allowlist] (no [[rules]]) still runs all 150+ built-in Gitleaks
+      // rules in v8.x. Adding [extend] useDefault = true alongside a top-level [allowlist]
+      // causes a TOML validation error in v8.21.2 — Gitleaks exits before writing the report.
+      const tomlContent = this.buildGitleaksToml(gitignoreRules || []);
       try {
         fs.writeFileSync(tomlPath, tomlContent, "utf-8");
       } catch {}
@@ -580,9 +578,11 @@ ${pathLines}
       try {
         await execAsync(cmd, { cwd: workspaceRoot, maxBuffer: 25 * 1024 * 1024, timeout: 60000 });
       } catch (execErr: any) {
-        // Gitleaks exits with code 1 when findings are found — that's expected
+        // Gitleaks exits with code 1 when findings are found — that's expected.
+        // Only bail out if there's no stdout AND no report file (real crash).
         if (!execErr.stdout && !fs.existsSync(reportPath)) {
-          onLog(`Gitleaks execution warning: ${execErr.message}`);
+          const detail = (execErr.stderr || execErr.message || "").slice(0, 500);
+          onLog(`Gitleaks execution warning: ${detail}`);
           return findings;
         }
       }

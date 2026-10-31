@@ -10,7 +10,7 @@
       "type": "local",
       "command": [
         "node",
-        "c:/Users/Soham/.antigravity-ide/extensions/codesentinel.codesentinel-0.1.0/dist/mcp-server.js"
+        "c:/Users/Soham/.antigravity-ide/extensions/codesentinel.codesentinel-0.2.2/dist/mcp-server.js"
       ],
       "enabled": true,
       "timeout": 600000,
@@ -22,7 +22,7 @@
       "type": "local",
       "command": [
         "node",
-        "c:/Users/Soham/.antigravity-ide/extensions/codesentinel.codesentinel-0.1.0/dist/atlas-bridge.js",
+        "c:/Users/Soham/.antigravity-ide/extensions/codesentinel.codesentinel-0.2.2/dist/atlas-bridge.js",
         "local",
         "d:/CODESENTINELVSCODE"
       ],

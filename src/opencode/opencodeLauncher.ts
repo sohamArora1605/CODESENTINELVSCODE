@@ -21,6 +21,11 @@ export class OpenCodeLauncher {
   private webServerUrl: string | null = null;
   private dockerContainerName: string | null = null;
   private activeWorkspaceRoot: string | null = null;
+  /** One OpenCode web server per workspace directory (key = normalized dir). proc is null when adopted from another window/orphan. */
+  private webServers: Map<string, { port: number; proc: ChildProcess | null }> = new Map();
+  /** Serializes server start-ups so concurrent callers (extension host + sidebar) cannot race each other. */
+  private startLock: Promise<unknown> = Promise.resolve();
+  private inflightStarts: Map<string, Promise<{ url: string; port: number; pid?: number }>> = new Map();
 
   private constructor() {}
 
@@ -56,6 +61,24 @@ export class OpenCodeLauncher {
     );
     if (fs.existsSync(nodeBin)) {
       return nodeBin;
+    }
+
+    if (isWin && process.env.APPDATA) {
+      const npmCmd = path.join(process.env.APPDATA, "npm", "opencode.cmd");
+      if (fs.existsSync(npmCmd)) {
+        return npmCmd;
+      }
+      const npmBinExe = path.join(
+        process.env.APPDATA,
+        "npm",
+        "node_modules",
+        "opencode-ai",
+        "bin",
+        "opencode.exe"
+      );
+      if (fs.existsSync(npmBinExe)) {
+        return npmBinExe;
+      }
     }
 
     return "opencode";
@@ -488,6 +511,7 @@ export class OpenCodeLauncher {
       env: {
         PATH: env.PATH,
         Path: env.Path,
+        CODESENTINEL_WORKSPACE: workspaceRoot,
       },
     });
 
@@ -527,7 +551,9 @@ export class OpenCodeLauncher {
 
     this.serverPort = targetPort;
     const opencodeCmd = this.getOpencodeCommand();
-    const env = DependencyManager.getInstance().getEnvWithBinPath();
+    const env = DependencyManager.getInstance().getEnvWithBinPath({
+      CODESENTINEL_WORKSPACE: workspaceRoot,
+    });
     const proc = spawn(opencodeCmd, ["serve", "--port", targetPort.toString(), "--hostname", targetHost], {
       cwd: workspaceRoot,
       shell: true,
@@ -576,10 +602,22 @@ export class OpenCodeLauncher {
    * otherwise their opencode.json MCP servers would leak into this workspace.
    */
   public async findRunningServerPort(workspaceRoot?: string): Promise<number | null> {
-    const candidatePorts = [this.webPort, 5123, 4096, 8080];
+    let basePort = 5123;
+    try {
+      basePort = vscode.workspace.getConfiguration("codesentinel").get<number>("opencodeWebPort", 5123);
+    } catch {}
+
+    // Servers are spawned on the first free port at/after basePort, so they can live anywhere in this
+    // window. Scan the whole range (in parallel) instead of a handful of fixed ports, otherwise
+    // orphaned servers are never found again and a fresh duplicate is spawned on every reload.
+    const candidatePorts: number[] = [this.webPort, 4096, 8080];
+    for (let p = basePort; p < basePort + 60; p++) candidatePorts.push(p);
     const uniquePorts = [...new Set(candidatePorts)];
-    for (const port of uniquePorts) {
-      const dir = await this.getServerDirectory(port);
+
+    const results = await Promise.all(
+      uniquePorts.map(async (port) => ({ port, dir: await this.getServerDirectory(port) }))
+    );
+    for (const { port, dir } of results) {
       if (!dir) continue;
       if (!workspaceRoot || this.normalizeDir(dir) === this.normalizeDir(workspaceRoot)) {
         return port;
@@ -604,45 +642,80 @@ export class OpenCodeLauncher {
     return preferred;
   }
 
-  public async startWebProcess(
+  /**
+   * Starts (or reuses) the OpenCode web server bound to `workspaceRoot` and returns the URL of a
+   * session that is guaranteed to belong to that exact directory.
+   * Calls are serialized and de-duplicated per directory.
+   */
+  public startWebProcess(
     workspaceRoot: string,
     port?: number
   ): Promise<{ url: string; port: number; pid?: number }> {
-    if (
-      this.isWebRunning() &&
-      this.activeWorkspaceRoot &&
-      this.normalizeDir(this.activeWorkspaceRoot) === this.normalizeDir(workspaceRoot) &&
-      this.webServerUrl
-    ) {
-      const activeDir = await this.getServerDirectory(this.webPort);
-      if (activeDir && this.normalizeDir(activeDir) === this.normalizeDir(workspaceRoot)) {
-        return { url: this.webServerUrl, port: this.webPort, pid: this.webProcess?.pid };
+    const key = this.normalizeDir(workspaceRoot);
+    const inflight = this.inflightStarts.get(key);
+    if (inflight) {
+      return inflight;
+    }
+
+    const run = this.startLock
+      .catch(() => {})
+      .then(() => this.startWebProcessInternal(workspaceRoot, port));
+    this.startLock = run.catch(() => {});
+
+    const tracked: Promise<{ url: string; port: number; pid?: number }> = run.finally(() => {
+      if (this.inflightStarts.get(key) === tracked) {
+        this.inflightStarts.delete(key);
       }
+    });
+    this.inflightStarts.set(key, tracked);
+    return tracked;
+  }
+
+  /** Marks `workspaceRoot` as the active workspace and resolves the session URL for it. */
+  private async activateWebServer(
+    workspaceRoot: string,
+    port: number,
+    proc: ChildProcess | null
+  ): Promise<{ url: string; port: number; pid?: number }> {
+    this.webPort = port;
+    this.activeWorkspaceRoot = workspaceRoot;
+    this.webProcess = proc;
+    const sessionUrl = await this.ensureWorkspaceSession(workspaceRoot, port);
+    this.webServerUrl = sessionUrl;
+    return { url: sessionUrl, port, pid: proc?.pid };
+  }
+
+  private async startWebProcessInternal(
+    workspaceRoot: string,
+    port?: number
+  ): Promise<{ url: string; port: number; pid?: number }> {
+    const key = this.normalizeDir(workspaceRoot);
+
+    // 1. Reuse a server this window already started for this exact directory (no kill / respawn when
+    //    the user just switches between projects).
+    const known = this.webServers.get(key);
+    if (known) {
+      const dir = await this.getServerDirectory(known.port);
+      if (dir && this.normalizeDir(dir) === key) {
+        return this.activateWebServer(workspaceRoot, known.port, known.proc);
+      }
+      this.webServers.delete(key);
     }
 
-    // If a different workspace was active, terminate it to ensure isolation
-    if (this.isWebRunning()) {
-      await this.stopWebProcess();
-    }
-
-    // Check if an existing OpenCode server on the host is already bound to this workspace
+    // 2. Adopt an already-running server bound to this directory (other window / orphan from reload).
     const existingPort = await this.findRunningServerPort(workspaceRoot);
     if (existingPort) {
-      this.webPort = existingPort;
-      this.activeWorkspaceRoot = workspaceRoot;
-      const projectUrl = await this.ensureWorkspaceSession(workspaceRoot, existingPort);
-      this.webServerUrl = projectUrl;
-      return { url: projectUrl, port: existingPort };
+      this.webServers.set(key, { port: existingPort, proc: null });
+      return this.activateWebServer(workspaceRoot, existingPort, null);
     }
 
+    // 3. Spawn a brand new server whose working directory is this workspace.
     // Ensure bundled skills (e.g. cloud-security-audit) are provisioned before starting server
     this.provisionSkills(workspaceRoot).catch(() => {});
 
     const config = vscode.workspace.getConfiguration("codesentinel");
     const preferredPort = port ?? config.get<number>("opencodeWebPort", 5123);
     const targetPort = await this.findFreePort(preferredPort);
-    this.webPort = targetPort;
-    this.activeWorkspaceRoot = workspaceRoot;
 
     const opencodeCmd = this.getOpencodeCommand();
     return new Promise((resolve, reject) => {
@@ -655,6 +728,10 @@ export class OpenCodeLauncher {
         resolved = true;
         if (pollInterval) clearInterval(pollInterval);
         if (failTimeout) clearTimeout(failTimeout);
+        this.webPort = targetPort;
+        this.activeWorkspaceRoot = workspaceRoot;
+        this.webProcess = proc;
+        this.webServers.set(key, { port: targetPort, proc });
         const sessionUrl = await this.ensureWorkspaceSession(workspaceRoot, targetPort);
         this.webServerUrl = sessionUrl;
         resolve({ url: sessionUrl, port: targetPort, pid });
@@ -669,6 +746,7 @@ export class OpenCodeLauncher {
           stdio: "pipe",
           env: DependencyManager.getInstance().getEnvWithBinPath({
             BROWSER: "none",
+            CODESENTINEL_WORKSPACE: workspaceRoot,
           }),
         }
       );
@@ -705,18 +783,24 @@ export class OpenCodeLauncher {
       proc.stderr?.on("data", handleOutput);
 
       proc.on("error", (err) => {
+        this.webServers.delete(key);
+        if (this.webProcess === proc) {
+          this.webProcess = null;
+        }
         if (!resolved) {
           resolved = true;
           if (pollInterval) clearInterval(pollInterval);
           if (failTimeout) clearTimeout(failTimeout);
-          this.webProcess = null;
           this.webServerUrl = null;
           reject(new Error(`Failed to start OpenCode service: ${err.message}`));
         }
       });
 
       proc.on("exit", (code) => {
-        this.webProcess = null;
+        this.webServers.delete(key);
+        if (this.webProcess === proc) {
+          this.webProcess = null;
+        }
         if (!resolved) {
           resolved = true;
           if (pollInterval) clearInterval(pollInterval);
@@ -737,11 +821,71 @@ export class OpenCodeLauncher {
   public async ensureWorkspaceSession(workspaceRoot: string, port: number): Promise<string> {
     const baseUrl = `http://127.0.0.1:${port}/`;
     const encodedDir = this.encodeDirectory(workspaceRoot);
-    return `${baseUrl}${encodedDir}/session`;
+    const fallbackUrl = `${baseUrl}${encodedDir}/session`;
+
+    try {
+      const encodedHeader = encodeURIComponent(workspaceRoot);
+      const headers: Record<string, string> = {
+        "x-opencode-directory": encodedHeader,
+        "Accept": "application/json",
+      };
+
+      // 1. Check if a session already exists for this exact directory
+      const listRes = await fetch(`${baseUrl}session?directory=${encodedHeader}&roots=true&limit=1`, {
+        headers,
+      });
+
+      if (listRes.ok) {
+        const sessions: any = await listRes.json();
+        if (Array.isArray(sessions) && sessions.length > 0 && sessions[0]?.id) {
+          return `${baseUrl}${encodedDir}/session/${sessions[0].id}`;
+        }
+      }
+
+      // 2. If no session exists, create a new session explicitly scoped to this directory
+      const createRes = await fetch(`${baseUrl}session`, {
+        method: "POST",
+        headers: {
+          ...headers,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({}),
+      });
+
+      if (createRes.ok) {
+        const created: any = await createRes.json();
+        if (created?.id) {
+          return `${baseUrl}${encodedDir}/session/${created.id}`;
+        }
+      }
+    } catch (e: any) {
+      console.warn("Could not bind OpenCode session via REST API:", e?.message);
+    }
+
+    return fallbackUrl;
   }
 
   public async stopWebProcess(): Promise<boolean> {
     let stopped = false;
+
+    // Clean up all tracked web servers
+    for (const [dir, server] of this.webServers.entries()) {
+      if (server.proc && !server.proc.killed) {
+        const pid = server.proc.pid;
+        if (process.platform === "win32" && pid) {
+          try {
+            await execAsync(`taskkill /pid ${pid} /T /F`);
+          } catch {
+            server.proc.kill();
+          }
+        } else {
+          server.proc.kill();
+        }
+        stopped = true;
+      }
+    }
+    this.webServers.clear();
+
     if (this.webProcess && !this.webProcess.killed) {
       const pid = this.webProcess.pid;
       if (process.platform === "win32" && pid) {

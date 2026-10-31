@@ -1,0 +1,53 @@
+{
+  "version": "1.0.0",
+  "target": {
+    "workspaceName": "CODESENTINELVSCODE",
+    "rootPath": "d:\\CODESENTINELVSCODE",
+    "detectedLanguages": [],
+    "cloudProviders": [
+      "Docker Container"
+    ]
+  },
+  "timestamp": "2026-10-27T02:33:38.408Z",
+  "summary": {
+    "totalFindings": 2,
+    "critical": 1,
+    "high": 1,
+    "medium": 0,
+    "low": 0
+  },
+  "findings": [
+    {
+      "id": "CS-CLOUD-01",
+      "title": "Hardcoded AWS Access Key ID",
+      "severity": "Critical",
+      "cvssScore": 9.8,
+      "cvssVector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+      "cwe": "CWE-798",
+      "category": "Hardcoded Secrets & Infrastructure",
+      "affectedFile": "test/cegarVerifier.test.ts",
+      "startLine": 21,
+      "endLine": 21,
+      "description": "Hardcoded AWS Access Key ID detected in source code, risking full AWS account takeover.",
+      "exploitScenario": "An adversary reviewing repo history or leaked artifacts can extract these credentials to compromise cloud infrastructure.",
+      "remediation": "Move credentials to a cloud secrets manager (AWS Secrets Manager, GCP Secret Manager, or environment variables) and rotate the exposed secret immediately."
+    },
+    {
+      "id": "CS-CLOUD-02",
+      "title": "Potential SSRF / Cloud Metadata Exfiltration Vector in 'downloadFile'",
+      "severity": "High",
+      "cvssScore": 8.6,
+      "cvssVector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+      "cwe": "CWE-918",
+      "category": "SSRF & Metadata Abuse",
+      "affectedFile": "src/scanner/securityToolManager.ts",
+      "startLine": 109,
+      "endLine": 206,
+      "source": "Input parameters to downloadFile",
+      "sink": "Outbound Network Client",
+      "description": "Function 'downloadFile' handles outbound HTTP requests. If the destination URL is user-controlled without strict IP validation, attackers can query internal cloud metadata endpoints (e.g. AWS IMDS 169.254.169.254) to dump instance IAM credentials.",
+      "exploitScenario": "Send a request with URL parameter pointing to 'http://169.254.169.254/latest/meta-data/iam/security-credentials/' to extract instance role tokens.",
+      "remediation": "Enforce a strict domain allowlist and resolve IPs to verify they do not belong to private CIDRs (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.169.254)."
+    }
+  ]
+}

@@ -429,6 +429,20 @@ export class GraphService {
     return { root, callers, callees, edges: Array.from(edgeMap.values()) };
   }
 
+  /**
+   * Convenience helper used by the CEGAR verifier: returns only the list of
+   * symbols that directly call `symbolName` in the Atlas code graph.
+   * Returns an empty array if the symbol is not found (graceful fallback).
+   */
+  public getCallers(workspaceRoot: string, symbolName: string): GraphSymbol[] {
+    try {
+      const result = this.getCallHierarchy(workspaceRoot, symbolName, { maxCallers: 50 });
+      return result.callers;
+    } catch {
+      return [];
+    }
+  }
+
   public expandBranch(
     workspaceRoot: string,
     symbolName: string,
@@ -713,7 +727,7 @@ export class GraphService {
 
       const levelNodes: GraphSymbol[] = [];
       const nextIds: string[] = [];
-      for (const n of nextFrontierMap.values()) {
+      for (const n of Array.from(nextFrontierMap.values())) {
         if (levelNodes.length < limitPerLevel) {
           levelNodes.push(this.mapSymbolRow(n));
           nextIds.push(n.id);
@@ -787,8 +801,8 @@ export class GraphService {
       visited.add(curr);
       recStack.push(curr);
 
-      const neighbors = fileDepMap.get(curr) || new Set();
-      for (const n of neighbors) {
+      const neighbors = fileDepMap.get(curr) || new Set<string>();
+      for (const n of Array.from(neighbors)) {
         if (recStack.includes(n)) {
           const idx = recStack.indexOf(n);
           const cycle = recStack.slice(idx).concat(n);
@@ -800,7 +814,7 @@ export class GraphService {
       recStack.pop();
     };
 
-    for (const f of allFiles) {
+    for (const f of Array.from(allFiles)) {
       if (!visited.has(f)) dfsCycle(f);
     }
 
@@ -821,8 +835,8 @@ export class GraphService {
         isInCycle: cycleNodesSet.has(f),
       });
 
-      const targets = fileDepMap.get(f) || new Set();
-      for (const t of targets) {
+      const targets = fileDepMap.get(f) || new Set<string>();
+      for (const t of Array.from(targets)) {
         edges.push({
           id: `dep_${f}_${t}`,
           source: f,

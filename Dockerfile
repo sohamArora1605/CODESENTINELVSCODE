@@ -51,5 +51,9 @@ WORKDIR /workspace
 ENV NODE_ENV=production \
     CODESENTINEL_CONTAINER=true
 
+# Create non-root user for runtime security (CWE-269 remediation)
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+USER appuser
+
 # Launch the CodeSentinel MCP Server CLI over stdio by default
 ENTRYPOINT ["node", "/app/dist/mcp-server.js"]
