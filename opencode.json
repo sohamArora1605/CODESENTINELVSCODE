@@ -10,26 +10,26 @@
       "type": "local",
       "command": [
         "node",
-        "c:/Users/Soham/.antigravity-ide/extensions/codesentinel.codesentinel-0.2.2/dist/mcp-server.js"
+        "./dist/mcp-server.js"
       ],
       "enabled": true,
       "timeout": 600000,
       "environment": {
-        "CODESENTINEL_WORKSPACE": "d:\\CODESENTINELVSCODE"
+        "CODESENTINEL_WORKSPACE": "."
       }
     },
     "atlas": {
       "type": "local",
       "command": [
         "node",
-        "c:/Users/Soham/.antigravity-ide/extensions/codesentinel.codesentinel-0.2.2/dist/atlas-bridge.js",
+        "./dist/atlas-bridge.js",
         "local",
-        "d:/CODESENTINELVSCODE"
+        "."
       ],
       "enabled": true,
       "timeout": 600000,
       "environment": {
-        "CODESENTINEL_WORKSPACE": "d:\\CODESENTINELVSCODE"
+        "CODESENTINEL_WORKSPACE": "."
       }
     }
   }

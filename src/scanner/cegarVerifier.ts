@@ -204,8 +204,16 @@ export class CegarVerifier {
     //   callable(arg1, arg2, ..., targetArg)
     // -------------------------------------------------------------------------
     if (cwe.includes("22") || finding.title.toLowerCase().includes("traversal")) {
+      const hasDirectUntrustedInput =
+        /\b(?:req\.|request\.|ctx\.request|params\[|query\[|GET\[|POST\[| r\.URL|http\.Request|FormValue|QueryParam|PathVariable|RequestParam)\b/i.test(
+          targetCode
+        );
       // Matches any function/method invocation: identifier(...) across any programming language
       const callMatches = Array.from(targetCode.matchAll(/([a-zA-Z0-9_.:]+)\s*\(\s*([^()]+)\s*\)/g));
+      let verifiedLiteralCall: string | null = null;
+      let verifiedBoundedCall = false;
+      let hasUnverifiedDynamicCall = false;
+
       for (const match of callMatches) {
         const argsStr = match[2];
         const args = argsStr.split(",").map((a) => a.trim());
@@ -240,24 +248,32 @@ export class CegarVerifier {
             ) ||
             /(?:storage|root|dir|base|cwd|path|__dirname)/i.test(match[1]);
 
-          if (isLiteralTarget && (isInternalBase || args.length === 1)) {
-            return {
-              verdict: "DEFENDED",
-              confidence: 0.98,
-              reason: `Static sink argument is an immutable string literal: ${lastArg}`,
-              proof: `Mathematical Proof: The trailing path element '${lastArg}' is an immutable string literal evaluated at compile time. Variable user input cannot manipulate path hierarchy across any programming language runtime.`,
-            };
-          }
-
-          if (isDirEntryOrBase && isInternalBase) {
-            return {
-              verdict: "DEFENDED",
-              confidence: 0.95,
-              reason: "Path element bounded to native directory readdir iteration or community basename sanitizer.",
-              proof: "Mathematical Proof: Operand originates from bounded directory listing or standard library basename sanitizer, precluding directory traversal parent escape ('../').",
-            };
+          if (isLiteralTarget && (isInternalBase || args.length === 1) && !hasDirectUntrustedInput) {
+            verifiedLiteralCall = lastArg;
+          } else if (isDirEntryOrBase && isInternalBase) {
+            verifiedBoundedCall = true;
+          } else {
+            hasUnverifiedDynamicCall = true;
           }
         }
+      }
+
+      if (!hasUnverifiedDynamicCall && verifiedLiteralCall) {
+        return {
+          verdict: "DEFENDED",
+          confidence: 0.98,
+          reason: `Static sink argument is an immutable string literal: ${verifiedLiteralCall}`,
+          proof: `Mathematical Proof: The trailing path element '${verifiedLiteralCall}' is an immutable string literal evaluated at compile time. Variable user input cannot manipulate path hierarchy across any programming language runtime.`,
+        };
+      }
+
+      if (!hasUnverifiedDynamicCall && verifiedBoundedCall) {
+        return {
+          verdict: "DEFENDED",
+          confidence: 0.95,
+          reason: "Path element bounded to native directory readdir iteration or community basename sanitizer.",
+          proof: "Mathematical Proof: Operand originates from bounded directory listing or standard library basename sanitizer, precluding directory traversal parent escape ('../').",
+        };
       }
     }
 
@@ -605,18 +621,39 @@ export class CegarVerifier {
 
     if (stats.available && finding.symbolName) {
       try {
-        const callers = graphService.getCallers(workspaceRoot, finding.symbolName);
+        const hierarchy = graphService.getCallHierarchy(workspaceRoot, finding.symbolName, { maxCallers: 50 });
+        const callers = hierarchy.callers;
         if (callers.length === 0) {
-          // Uncalled dead code or isolated utility
-          const invariantKey = `deadcode:${finding.symbolName}`;
-          this.specStore.set(invariantKey, "Unreachable from public entry points");
-          return {
-            verdict: "DEFENDED",
-            confidence: 0.88,
-            reason: `Symbol '${finding.symbolName}' has zero external call sites in Atlas call graph.`,
-            proof: "Refinement Invariant: AST call hierarchy reveals no reachability from workspace entry points or route handlers.",
-            invariantLearned: invariantKey,
-          };
+          // Guard against false negatives on framework route handlers, controllers, or exported entrypoints
+          const isExportedSymbol = Boolean(hierarchy.root?.isExported);
+          const isEntrypointName =
+            /^(?:main|init|setup|activate|deactivate|handle|on[A-Z_]|get|post|put|delete|patch|route|controller|handler|middleware|index|run|execute|serve|lambda_handler|wsgi|asgi)/i.test(
+              finding.symbolName
+            );
+          const isEntrypointFile =
+            /(?:^|\/)(?:routes?|controllers?|handlers?|api|views|endpoints|pages|server|main|index|cli|cmd|extension)\b/i.test(
+              normPath
+            );
+          const hasFrameworkDecoratorOrDirectInput =
+            /@(?:app|router|route|Get|Post|Put|Delete|Patch|RequestMapping|Controller|RestController)\b/i.test(
+              fileContent
+            ) ||
+            /\b(?:req\.|request\.|ctx\.|params\[|query\[|argv|environ|getenv)\b/i.test(
+              lineContent + " " + (finding.snippet || "")
+            );
+
+          if (!isExportedSymbol && !isEntrypointName && !isEntrypointFile && !hasFrameworkDecoratorOrDirectInput) {
+            // Uncalled private/internal dead code
+            const invariantKey = `deadcode:${finding.symbolName}`;
+            this.specStore.set(invariantKey, "Unreachable private symbol from public entry points");
+            return {
+              verdict: "DEFENDED",
+              confidence: 0.88,
+              reason: `Internal non-exported symbol '${finding.symbolName}' has zero call sites in Atlas call graph.`,
+              proof: "Refinement Invariant: AST call hierarchy confirms private/internal symbol has no incoming edges from any workspace entry points or route handlers.",
+              invariantLearned: invariantKey,
+            };
+          }
         }
       } catch {}
     }

@@ -1,4 +1,4 @@
-import * as vscode from "vscode";
+import type * as vscodeTypes from "vscode";
 import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
@@ -7,6 +7,14 @@ import { promisify } from "util";
 import * as https from "https";
 
 const execAsync = promisify(exec);
+
+function getVscode(): typeof vscodeTypes | null {
+  try {
+    return require("vscode");
+  } catch {
+    return null;
+  }
+}
 
 export interface DependencyStatus {
   opencodeInstalled: boolean;
@@ -67,7 +75,8 @@ export class DependencyManager {
 
   public getStoragePath(): string {
     if (!this.globalStoragePath) {
-      this.globalStoragePath = path.join(os.homedir(), ".codesentinel");
+      this.globalStoragePath =
+        process.env.CODESENTINEL_STORAGE_PATH || path.join(os.homedir(), ".codesentinel");
     }
     return this.globalStoragePath;
   }
@@ -107,7 +116,7 @@ export class DependencyManager {
     if (platform === "win32") {
       return arch === "arm64" ? "atlas-windows-arm64.zip" : "atlas-windows-x86_64.zip";
     } else if (platform === "darwin") {
-      return arch === "arm64" ? "atlas-macos-arm64.tar.gz" : "atlas-macos-arm64.tar.gz";
+      return arch === "arm64" ? "atlas-macos-arm64.tar.gz" : "atlas-macos-x86_64.tar.gz";
     } else if (platform === "linux") {
       return arch === "arm64" ? "atlas-linux-arm64.tar.gz" : "atlas-linux-x86_64.tar.gz";
     }
@@ -141,11 +150,14 @@ export class DependencyManager {
 
     // 1. Check custom user setting
     try {
-      const config = vscode.workspace.getConfiguration("codesentinel");
-      const customPath = config.get<string>("atlasPath", "").trim();
-      if (customPath && fs.existsSync(customPath)) {
-        this.cachedAtlasPath = customPath;
-        return customPath;
+      const vscode = getVscode();
+      if (vscode) {
+        const config = vscode.workspace.getConfiguration("codesentinel");
+        const customPath = config.get<string>("atlasPath", "").trim();
+        if (customPath && fs.existsSync(customPath)) {
+          this.cachedAtlasPath = customPath;
+          return customPath;
+        }
       }
     } catch {}
 
@@ -179,11 +191,14 @@ export class DependencyManager {
 
     // 1. Check custom setting
     try {
-      const config = vscode.workspace.getConfiguration("codesentinel");
-      const custom = config.get<string>("opencodePath", "").trim();
-      if (custom && custom !== "opencode" && fs.existsSync(custom)) {
-        this.cachedOpencodePath = custom;
-        return custom;
+      const vscode = getVscode();
+      if (vscode) {
+        const config = vscode.workspace.getConfiguration("codesentinel");
+        const custom = config.get<string>("opencodePath", "").trim();
+        if (custom && custom !== "opencode" && fs.existsSync(custom)) {
+          this.cachedOpencodePath = custom;
+          return custom;
+        }
       }
     } catch {}
 
@@ -341,12 +356,34 @@ export class DependencyManager {
     const downloadUrl = `https://github.com/LordCasser/atlas/releases/download/v1.7.0/${assetName}`;
     const archivePath = path.join(storagePath, assetName);
 
-    await this.downloadFile(downloadUrl, archivePath);
+    try {
+      await this.downloadFile(downloadUrl, archivePath);
+    } catch (dlErr) {
+      // Fallback for macOS x64 -> arm64 (Rosetta 2) or Windows arm64 -> x86_64 if native arch asset is absent
+      if (process.platform === "darwin" && assetName !== "atlas-macos-arm64.tar.gz") {
+        const fallbackUrl = "https://github.com/LordCasser/atlas/releases/download/v1.7.0/atlas-macos-arm64.tar.gz";
+        await this.downloadFile(fallbackUrl, archivePath);
+      } else if (process.platform === "win32" && assetName !== "atlas-windows-x86_64.zip") {
+        const fallbackUrl = "https://github.com/LordCasser/atlas/releases/download/v1.7.0/atlas-windows-x86_64.zip";
+        await this.downloadFile(fallbackUrl, archivePath);
+      } else {
+        throw dlErr;
+      }
+    }
 
     // Extract archive natively
     if (assetName.endsWith(".zip")) {
       if (process.platform === "win32") {
-        await execAsync(`powershell -NoProfile -Command "Expand-Archive -Path '${archivePath}' -DestinationPath '${binDir}' -Force"`);
+        try {
+          await execAsync(`tar -xf "${archivePath}" -C "${binDir}"`, { timeout: 30000 });
+        } catch {
+          const safeArchive = archivePath.replace(/'/g, "''");
+          const safeDest = binDir.replace(/'/g, "''");
+          await execAsync(
+            `powershell -NoProfile -NonInteractive -Command "Expand-Archive -LiteralPath '${safeArchive}' -DestinationPath '${safeDest}' -Force"`,
+            { timeout: 60000 }
+          );
+        }
       } else {
         await execAsync(`unzip -o "${archivePath}" -d "${binDir}"`);
       }
@@ -403,9 +440,16 @@ export class DependencyManager {
 
         if (assetName.endsWith(".zip")) {
           if (isWin) {
-            await execAsync(
-              `powershell -NoProfile -Command "Expand-Archive -Path '${archivePath}' -DestinationPath '${binDir}' -Force"`
-            );
+            try {
+              await execAsync(`tar -xf "${archivePath}" -C "${binDir}"`, { timeout: 30000 });
+            } catch {
+              const safeArchive = archivePath.replace(/'/g, "''");
+              const safeDest = binDir.replace(/'/g, "''");
+              await execAsync(
+                `powershell -NoProfile -NonInteractive -Command "Expand-Archive -LiteralPath '${safeArchive}' -DestinationPath '${safeDest}' -Force"`,
+                { timeout: 60000 }
+              );
+            }
           } else {
             await execAsync(`unzip -o "${archivePath}" -d "${binDir}"`);
           }
@@ -458,7 +502,7 @@ export class DependencyManager {
   /**
    * Verify and automatically install missing host dependencies with progress reporting.
    */
-  public async ensureDependencies(context: vscode.ExtensionContext): Promise<void> {
+  public async ensureDependencies(context: vscodeTypes.ExtensionContext): Promise<void> {
     const storagePath = context.globalStorageUri.fsPath;
     this.setStoragePath(storagePath);
     fs.mkdirSync(storagePath, { recursive: true });
@@ -506,6 +550,11 @@ export class DependencyManager {
       percent: 30,
       detail: `Setting up: ${missing.join(", ")}...`,
     });
+
+    const vscode = getVscode();
+    if (!vscode) {
+      return;
+    }
 
     await vscode.window.withProgress(
       {

@@ -244,6 +244,7 @@ export class OpenCodeLauncher {
         },
       };
     } else {
+      const storagePath = DependencyManager.getInstance().getStoragePath();
       currentConfig.mcp["codesentinel"] = {
         type: "local",
         command: ["node", mcpServerScriptPath.replace(/\\/g, "/")],
@@ -251,6 +252,8 @@ export class OpenCodeLauncher {
         timeout: mcpTimeoutMs,
         environment: {
           CODESENTINEL_WORKSPACE: workspaceRoot,
+          CODESENTINEL_STORAGE_PATH: storagePath,
+          CODESENTINEL_EXTENSION_PATH: extensionRoot,
         },
       };
     }
@@ -273,6 +276,8 @@ export class OpenCodeLauncher {
       timeout: mcpTimeoutMs,
       environment: {
         CODESENTINEL_WORKSPACE: workspaceRoot,
+        CODESENTINEL_STORAGE_PATH: DependencyManager.getInstance().getStoragePath(),
+        CODESENTINEL_EXTENSION_PATH: extensionRoot,
       },
     };
 
@@ -551,10 +556,14 @@ export class OpenCodeLauncher {
 
     this.serverPort = targetPort;
     const opencodeCmd = this.getOpencodeCommand();
+    const safeCmd =
+      opencodeCmd.includes(" ") && !opencodeCmd.startsWith('"')
+        ? `"${opencodeCmd}"`
+        : opencodeCmd;
     const env = DependencyManager.getInstance().getEnvWithBinPath({
       CODESENTINEL_WORKSPACE: workspaceRoot,
     });
-    const proc = spawn(opencodeCmd, ["serve", "--port", targetPort.toString(), "--hostname", targetHost], {
+    const proc = spawn(safeCmd, ["serve", "--port", targetPort.toString(), "--hostname", targetHost], {
       cwd: workspaceRoot,
       shell: true,
       stdio: "pipe",
@@ -718,6 +727,10 @@ export class OpenCodeLauncher {
     const targetPort = await this.findFreePort(preferredPort);
 
     const opencodeCmd = this.getOpencodeCommand();
+    const safeCmd =
+      opencodeCmd.includes(" ") && !opencodeCmd.startsWith('"')
+        ? `"${opencodeCmd}"`
+        : opencodeCmd;
     return new Promise((resolve, reject) => {
       let resolved = false;
       let pollInterval: NodeJS.Timeout | null = null;
@@ -738,7 +751,7 @@ export class OpenCodeLauncher {
       };
 
       const proc = spawn(
-        opencodeCmd,
+        safeCmd,
         ["serve", "--port", targetPort.toString(), "--hostname", "127.0.0.1"],
         {
           cwd: workspaceRoot,

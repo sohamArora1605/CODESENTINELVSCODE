@@ -243,6 +243,30 @@ export async function testCegarVerifier(): Promise<void> {
   assert.strictEqual(javaResult.verdict, "DEFENDED", "Java Paths.get with literal target must be DEFENDED");
   console.log("  ✔ Multi-language Java path sink correctly proven DEFENDED");
 
+  // Test 7G: Multi-Call Line Soundness - Untrusted sink on same line as safe literal helper call must NOT be DEFENDED
+  const multiCallTaintedFinding: ClubbedFinding = {
+    id: "VUL-MULTI-CALL-TAINTED",
+    title: "Path traversal with helper call on same line",
+    severity: "High",
+    cwe: "CWE-22",
+    category: "Path Traversal",
+    filePath: "src/routes/download.ts",
+    line: 55,
+    endLine: 55,
+    snippet: 'const data = fs.readFileSync(req.query.file, path.join(rootPath, "utf8"));',
+    description: "Untrusted req.query.file on same line as literal path.join",
+    remediation: "Sanitize req.query.file",
+    tools: ["Opengrep AST Engine"],
+    symbolName: "handleDownload",
+  };
+  const multiCallResult = await verifier.verifyFinding(multiCallTaintedFinding, process.cwd());
+  assert.notStrictEqual(
+    multiCallResult.verdict,
+    "DEFENDED",
+    "Untrusted input on a multi-call line or route handler must NEVER be falsely marked DEFENDED"
+  );
+  console.log("  ✔ Multi-call line & route handler entrypoint soundness verified (no false-negative DEFENDED)");
+
   // Test 8: Batch Verification across all 7 languages
   const batch = await verifier.verifyProjectFindings(
     [

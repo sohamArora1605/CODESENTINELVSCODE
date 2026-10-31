@@ -1,22 +1,23 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import * as path from "path";
-import * as fs from "fs";
 import { CodeSentinelMcpServer } from "./mcpServer";
+import { SecurityToolManager } from "../scanner/securityToolManager";
+import { DependencyManager } from "../services/dependencyManager";
 
 async function main() {
-  const server = new CodeSentinelMcpServer("codesentinel-standalone", "0.2.0");
+  const storagePath = process.env.CODESENTINEL_STORAGE_PATH;
+  if (storagePath) {
+    SecurityToolManager.getInstance().setStoragePath(storagePath);
+    DependencyManager.getInstance().setStoragePath(storagePath);
+  }
 
-  server.setWorkspaceContextResolver(() => {
-    const root = process.env.CODESENTINEL_WORKSPACE || process.cwd();
-    const resolved = path.resolve(root);
-    return {
-      rootPath: resolved,
-      name: path.basename(resolved),
-      detectedLanguages: [],
-      hasGit: fs.existsSync(path.join(resolved, ".git")),
-      hasOpenCodeConfig: fs.existsSync(path.join(resolved, "opencode.json")),
-    };
-  });
+  const extPath =
+    process.env.CODESENTINEL_EXTENSION_PATH || path.resolve(__dirname, "..");
+  SecurityToolManager.getInstance().setExtensionPath(extPath);
+
+  // Use CodeSentinelMcpServer's built-in resolveContext() which automatically
+  // resolves CODESENTINEL_WORKSPACE / process.cwd() and detects project languages.
+  const server = new CodeSentinelMcpServer("codesentinel-standalone", "0.2.2");
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

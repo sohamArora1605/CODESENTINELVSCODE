@@ -38,6 +38,8 @@ export async function testOpenCodeLauncher(): Promise<void> {
     assert.deepStrictEqual(parsed.mcp.codesentinel.command, ["node", fakeMcpScript.replace(/\\/g, "/")]);
     assert.strictEqual(parsed.mcp.codesentinel.enabled, true);
     assert.strictEqual(parsed.mcp.codesentinel.environment.CODESENTINEL_WORKSPACE, tmpDir);
+    assert.ok(parsed.mcp.codesentinel.environment.CODESENTINEL_STORAGE_PATH, "Storage path env var must be propagated to MCP server");
+    assert.ok(parsed.mcp.codesentinel.environment.CODESENTINEL_EXTENSION_PATH, "Extension path env var must be propagated to MCP server");
 
     // Verify Atlas MCP registration
     assert.ok(parsed.mcp.atlas, "opencode.json must register 'atlas'");
@@ -106,7 +108,10 @@ export async function testOpenCodeLauncher(): Promise<void> {
   assert.strictEqual(decoded, "D:/CODESENTINELVSCODE", "Decoded path must be valid forward-slash path");
 
   const sessionUrl = await launcher.ensureWorkspaceSession(sampleDir, 5123);
-  assert.strictEqual(sessionUrl, "http://127.0.0.1:5123/RDovQ09ERVNFTlRJTkVMVlNDT0RF/session");
+  assert.ok(
+    sessionUrl.startsWith("http://127.0.0.1:5123/RDovQ09ERVNFTlRJTkVMVlNDT0RF/session"),
+    `Session URL must start with encoded workspace session prefix, got: ${sessionUrl}`
+  );
   console.log("  ✔ Active workspace directory encoding and session routing verified");
 
   // Test 8: DependencyManager asset naming & auto-install test

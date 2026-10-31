@@ -990,32 +990,123 @@ export class CodeSentinelMcpServer {
       const rootPath = ctx.rootPath;
       const graphService = GraphService.getInstance();
       const stats = graphService.getStats(rootPath);
+      const fileFilter = typeof args?.fileFilter === "string" ? args.fileFilter.trim().toLowerCase() : "";
 
-      // 1. Detect Cloud Footprint & Frameworks
+      // 1. Detect Cloud Footprint & Frameworks across all ecosystems (Node, Python, Go, Rust, Java, IaC)
       const detectedCloudProviders: string[] = [];
       const detectedFrameworks: string[] = [];
 
       const pkgJsonPath = path.join(rootPath, "package.json");
-      let allDeps: Record<string, string> = {};
       if (fs.existsSync(pkgJsonPath)) {
         try {
           const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, "utf-8"));
-          allDeps = { ...pkg.dependencies, ...pkg.devDependencies };
+          const allDeps = { ...pkg.dependencies, ...pkg.devDependencies };
+          const depKeys = Object.keys(allDeps);
+          if (depKeys.some((d) => d.startsWith("@aws-sdk/") || d === "aws-sdk")) detectedCloudProviders.push("AWS");
+          if (depKeys.some((d) => d.startsWith("@google-cloud/") || d.includes("firebase"))) detectedCloudProviders.push("GCP");
+          if (depKeys.some((d) => d.startsWith("@azure/"))) detectedCloudProviders.push("Azure");
+          if (depKeys.some((d) => d.includes("cloudflare") || d === "wrangler")) detectedCloudProviders.push("Cloudflare");
+          if (depKeys.some((d) => ["express", "fastify", "koa", "next", "@nestjs/core", "hono"].includes(d))) {
+            detectedFrameworks.push("Node Web Framework");
+          }
         } catch {}
       }
 
-      const depKeys = Object.keys(allDeps);
-      if (depKeys.some((d) => d.startsWith("@aws-sdk/") || d === "aws-sdk")) detectedCloudProviders.push("AWS");
-      if (depKeys.some((d) => d.startsWith("@google-cloud/") || d.includes("firebase"))) detectedCloudProviders.push("GCP");
-      if (depKeys.some((d) => d.startsWith("@azure/"))) detectedCloudProviders.push("Azure");
-      if (depKeys.some((d) => d.includes("cloudflare") || d === "wrangler")) detectedCloudProviders.push("Cloudflare");
-      if (depKeys.some((d) => d === "express" || d === "fastify" || d === "koa" || d === "next" || d === "nest")) detectedFrameworks.push("Node Web Framework");
+      const checkTextManifest = (relFile: string, checks: Array<{ match: RegExp; cloud?: string; framework?: string }>) => {
+        const p = path.join(rootPath, relFile);
+        if (!fs.existsSync(p)) return;
+        try {
+          const txt = fs.readFileSync(p, "utf-8");
+          for (const c of checks) {
+            if (c.match.test(txt)) {
+              if (c.cloud) detectedCloudProviders.push(c.cloud);
+              if (c.framework) detectedFrameworks.push(c.framework);
+            }
+          }
+        } catch {}
+      };
 
-      if (fs.existsSync(path.join(rootPath, "Dockerfile"))) detectedCloudProviders.push("Docker Container");
-      if (fs.existsSync(path.join(rootPath, "serverless.yml")) || fs.existsSync(path.join(rootPath, "serverless.ts"))) detectedCloudProviders.push("Serverless Framework");
-      if (fs.existsSync(path.join(rootPath, "wrangler.toml")) || fs.existsSync(path.join(rootPath, "wrangler.json"))) detectedCloudProviders.push("Cloudflare Workers");
+      for (const pyFile of ["requirements.txt", "pyproject.toml", "Pipfile"]) {
+        checkTextManifest(pyFile, [
+          { match: /\b(boto3|botocore|aiobotocore)\b/i, cloud: "AWS" },
+          { match: /\bgoogle-cloud-[a-z0-9_-]+/i, cloud: "GCP" },
+          { match: /\bazure-[a-z0-9_-]+/i, cloud: "Azure" },
+          { match: /\b(fastapi|django|flask|starlette|tornado)\b/i, framework: "Python Web Framework" },
+        ]);
+      }
 
-      // 2. Scan for Hardcoded Secrets & Cloud Keys
+      checkTextManifest("go.mod", [
+        { match: /aws-sdk-go/i, cloud: "AWS" },
+        { match: /cloud\.google\.com\/go/i, cloud: "GCP" },
+        { match: /Azure\/azure-sdk-for-go/i, cloud: "Azure" },
+        { match: /\b(gin-gonic\/gin|gofiber\/fiber|labstack\/echo|go-chi\/chi)\b/i, framework: "Go Web Framework" },
+      ]);
+
+      checkTextManifest("Cargo.toml", [
+        { match: /\b(aws-sdk-|aws-config|rusoto_)/i, cloud: "AWS" },
+        { match: /\bgoogle-cloud-/i, cloud: "GCP" },
+        { match: /\bazure_/i, cloud: "Azure" },
+        { match: /\b(actix-web|axum|rocket|warp)\b/i, framework: "Rust Web Framework" },
+      ]);
+
+      for (const jvmFile of ["pom.xml", "build.gradle", "build.gradle.kts"]) {
+        checkTextManifest(jvmFile, [
+          { match: /\b(software\.amazon\.awssdk|com\.amazonaws)\b/i, cloud: "AWS" },
+          { match: /\bcom\.google\.cloud\b/i, cloud: "GCP" },
+          { match: /\bcom\.azure\b/i, cloud: "Azure" },
+          { match: /\b(spring-boot|quarkus|micronaut)\b/i, framework: "JVM Web Framework" },
+        ]);
+      }
+
+      if (fs.existsSync(path.join(rootPath, "Dockerfile")) || fs.existsSync(path.join(rootPath, "docker-compose.yml"))) {
+        detectedCloudProviders.push("Docker Container");
+      }
+      if (fs.existsSync(path.join(rootPath, "serverless.yml")) || fs.existsSync(path.join(rootPath, "serverless.ts")) || fs.existsSync(path.join(rootPath, "template.yaml"))) {
+        detectedCloudProviders.push("Serverless Framework");
+      }
+      if (fs.existsSync(path.join(rootPath, "wrangler.toml")) || fs.existsSync(path.join(rootPath, "wrangler.json"))) {
+        detectedCloudProviders.push("Cloudflare Workers");
+      }
+
+      // Collect candidate files from both Atlas code graph AND filesystem walk (for IaC/configs or unindexed repos)
+      const candidateFileSet = new Set<string>(
+        graphService.searchSymbols(rootPath, "", 200, "files").map((f) => f.path.replace(/\\/g, "/"))
+      );
+      const ignoredAuditDirs = new Set([
+        "node_modules", ".git", ".opencode", ".codesentinel", ".atlas",
+        "dist", "build", "out", "vendor", ".venv", "venv", "__pycache__",
+        "target", ".gradle", "coverage",
+      ]);
+      const scannableExts = new Set([
+        ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".rs", ".java", ".cs", ".rb", ".php",
+        ".tf", ".tfvars", ".yaml", ".yml", ".json", ".toml", ".env", ".sh", ".dockerfile",
+      ]);
+
+      const walkWorkspace = (dir: string, depth: number) => {
+        if (depth > 5 || candidateFileSet.size >= 300) return;
+        try {
+          const entries = fs.readdirSync(dir, { withFileTypes: true });
+          for (const entry of entries) {
+            if (candidateFileSet.size >= 300) break;
+            if (entry.isDirectory()) {
+              if (!ignoredAuditDirs.has(entry.name)) {
+                walkWorkspace(path.join(dir, entry.name), depth + 1);
+              }
+            } else if (entry.isFile()) {
+              const rel = path.relative(rootPath, path.join(dir, entry.name)).replace(/\\/g, "/");
+              if (rel.startsWith("resources/rules/")) continue;
+              const ext = path.extname(entry.name).toLowerCase();
+              if (ext === ".tf") detectedCloudProviders.push("Terraform IaC");
+              if (scannableExts.has(ext) || entry.name === "Dockerfile" || entry.name.startsWith(".env")) {
+                candidateFileSet.add(rel);
+              }
+            }
+          }
+        } catch {}
+      };
+      walkWorkspace(rootPath, 0);
+
+      // 2. Scan for Hardcoded Secrets, Cloud Keys & Misconfigurations
       const findings: Array<{
         id: string;
         title: string;
@@ -1036,40 +1127,70 @@ export class CodeSentinelMcpServer {
       }> = [];
 
       let findingCounter = 1;
-      const candidateFiles = graphService.searchSymbols(rootPath, "", 100, "files").map((f) => f.path);
-      const secretRegexes: Array<{ pattern: RegExp; title: string; severity: "Critical" | "High" | "Medium"; cwe: string; desc: string }> = [
+      const candidateFiles = Array.from(candidateFileSet).filter((relPath) =>
+        fileFilter ? relPath.toLowerCase().includes(fileFilter) : true
+      );
+      const secretRegexes: Array<{ pattern: RegExp; title: string; severity: "Critical" | "High" | "Medium"; cwe: string; category: string; desc: string; remediation: string }> = [
         {
           pattern: /AKIA[0-9A-Z]{16}/,
           title: "Hardcoded AWS Access Key ID",
           severity: "Critical",
           cwe: "CWE-798",
+          category: "Hardcoded Secrets & Infrastructure",
           desc: "Hardcoded AWS Access Key ID detected in source code, risking full AWS account takeover.",
+          remediation: "Move credentials to AWS Secrets Manager or IAM Roles and rotate the exposed key immediately.",
         },
         {
           pattern: /-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----/,
           title: "Hardcoded Private Key",
           severity: "Critical",
           cwe: "CWE-798",
+          category: "Hardcoded Secrets & Infrastructure",
           desc: "Unencrypted private cryptographic key block embedded in plaintext source file.",
+          remediation: "Remove the private key from source control, revoke the key pair, and load keys from a secure vault at runtime.",
         },
         {
           pattern: /ghp_[A-Za-z0-9_]{36}/,
           title: "Hardcoded GitHub Personal Access Token",
           severity: "High",
           cwe: "CWE-798",
+          category: "Hardcoded Secrets & Infrastructure",
           desc: "GitHub personal access token exposed in source code.",
+          remediation: "Revoke the GitHub token and use short-lived GITHUB_TOKEN or OIDC federation.",
         },
         {
           pattern: /(?:https:\/\/hooks\.slack\.com\/services\/T[0-9A-Za-z]+\/B[0-9A-Za-z]+\/[0-9A-Za-z]+)/,
           title: "Hardcoded Slack Incoming Webhook",
           severity: "Medium",
           cwe: "CWE-200",
+          category: "Hardcoded Secrets & Infrastructure",
           desc: "Slack incoming webhook URL exposed in source code.",
+          remediation: "Store webhook URLs in environment variables or secret managers and rotate the webhook.",
+        },
+        {
+          pattern: /169\.254\.169\.254|metadata\.google\.internal/,
+          title: "Direct Cloud Instance Metadata Service (IMDS) Reference",
+          severity: "Medium",
+          cwe: "CWE-918",
+          category: "SSRF & Metadata Abuse",
+          desc: "Direct reference to cloud instance metadata endpoint detected. Ensure IMDSv2 hop-limit=1 and strict request authentication are enforced.",
+          remediation: "Require IMDSv2 session tokens (X-aws-ec2-metadata-token) and block user-controlled URLs from reaching link-local 169.254.169.254.",
         },
       ];
 
       for (const relPath of candidateFiles) {
-        if (relPath.includes("node_modules") || relPath.includes(".git") || relPath.includes("dist")) continue;
+        const normRel = relPath.replace(/\\/g, "/");
+        if (
+          normRel.includes("node_modules/") ||
+          normRel.includes(".git/") ||
+          normRel.includes("dist/") ||
+          normRel.includes("resources/rules/") ||
+          normRel.endsWith("mcpServer.ts") ||
+          normRel.endsWith("security-audit-report.json") ||
+          normRel.endsWith("SECURITY-AUDIT-REPORT.md")
+        ) {
+          continue;
+        }
         const absPath = path.isAbsolute(relPath) ? relPath : path.join(rootPath, relPath);
         if (!fs.existsSync(absPath)) continue;
         try {
@@ -1086,13 +1207,13 @@ export class CodeSentinelMcpServer {
                   cvssScore: sec.severity === "Critical" ? 9.8 : sec.severity === "High" ? 7.5 : 5.3,
                   cvssVector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
                   cwe: sec.cwe,
-                  category: "Hardcoded Secrets & Infrastructure",
-                  affectedFile: relPath,
+                  category: sec.category,
+                  affectedFile: normRel,
                   startLine: i + 1,
                   endLine: i + 1,
                   description: sec.desc,
-                  exploitScenario: "An adversary reviewing repo history or leaked artifacts can extract these credentials to compromise cloud infrastructure.",
-                  remediation: "Move credentials to a cloud secrets manager (AWS Secrets Manager, GCP Secret Manager, or environment variables) and rotate the exposed secret immediately.",
+                  exploitScenario: "An adversary reviewing repo history or leaked artifacts can exploit this exposure to compromise cloud infrastructure.",
+                  remediation: sec.remediation,
                 });
               }
             }
@@ -1100,31 +1221,36 @@ export class CodeSentinelMcpServer {
         } catch {}
       }
 
-      // 3. Scan for Potential SSRF & Metadata Endpoints in AST Symbols
+      // 3. Scan for Potential SSRF & Metadata Endpoints in AST Symbols (up to 15 findings, no premature break)
       const allSyms = graphService.searchSymbols(rootPath, "", 150, "callables");
+      let ssrfCount = 0;
       for (const s of allSyms) {
+        if (ssrfCount >= 15) break;
+        if (fileFilter && !s.path.toLowerCase().includes(fileFilter)) continue;
         if (/proxy|download|fetch|request|webhook|forward/i.test(s.name)) {
-          const hierarchy = graphService.getCallHierarchy(rootPath, s.name);
-          if (hierarchy.callers.length > 0 || /handler|controller|api|route/i.test(s.path)) {
-            findings.push({
-              id: `CS-CLOUD-${String(findingCounter++).padStart(2, "0")}`,
-              title: `Potential SSRF / Cloud Metadata Exfiltration Vector in '${s.name}'`,
-              severity: "High",
-              cvssScore: 8.6,
-              cvssVector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
-              cwe: "CWE-918",
-              category: "SSRF & Metadata Abuse",
-              affectedFile: s.path,
-              startLine: s.startLine,
-              endLine: s.endLine,
-              source: `Input parameters to ${s.name}`,
-              sink: "Outbound Network Client",
-              description: `Function '${s.name}' handles outbound HTTP requests. If the destination URL is user-controlled without strict IP validation, attackers can query internal cloud metadata endpoints (e.g. AWS IMDS 169.254.169.254) to dump instance IAM credentials.`,
-              exploitScenario: "Send a request with URL parameter pointing to 'http://169.254.169.254/latest/meta-data/iam/security-credentials/' to extract instance role tokens.",
-              remediation: "Enforce a strict domain allowlist and resolve IPs to verify they do not belong to private CIDRs (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.169.254).",
-            });
-            break;
-          }
+          try {
+            const hierarchy = graphService.getCallHierarchy(rootPath, s.name);
+            if (hierarchy.callers.length > 0 || /handler|controller|api|route/i.test(s.path)) {
+              ssrfCount++;
+              findings.push({
+                id: `CS-CLOUD-${String(findingCounter++).padStart(2, "0")}`,
+                title: `Potential SSRF / Cloud Metadata Exfiltration Vector in '${s.name}'`,
+                severity: "High",
+                cvssScore: 8.6,
+                cvssVector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+                cwe: "CWE-918",
+                category: "SSRF & Metadata Abuse",
+                affectedFile: s.path,
+                startLine: s.startLine,
+                endLine: s.endLine,
+                source: `Input parameters to ${s.name}`,
+                sink: "Outbound Network Client",
+                description: `Function '${s.name}' handles outbound HTTP requests. If the destination URL is user-controlled without strict IP validation, attackers can query internal cloud metadata endpoints (e.g. AWS IMDS 169.254.169.254) to dump instance IAM credentials.`,
+                exploitScenario: "Send a request with URL parameter pointing to 'http://169.254.169.254/latest/meta-data/iam/security-credentials/' to extract instance role tokens.",
+                remediation: "Enforce a strict domain allowlist and resolve IPs to verify they do not belong to private CIDRs (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.169.254).",
+              });
+            }
+          } catch {}
         }
       }
 

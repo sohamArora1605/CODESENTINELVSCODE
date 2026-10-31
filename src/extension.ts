@@ -15,6 +15,7 @@ export function activate(context: vscode.ExtensionContext) {
   // Initialize self-contained extension storage directory
   const storagePath = context.globalStorageUri.fsPath;
   SecurityToolManager.getInstance().setStoragePath(storagePath);
+  SecurityToolManager.getInstance().setExtensionPath(context.extensionUri.fsPath);
   DependencyManager.getInstance().setStoragePath(storagePath);
 
   // Auto-bootstrap host-native dependencies (OpenCode CLI, Atlas Semantic Engine, & SAST tools)

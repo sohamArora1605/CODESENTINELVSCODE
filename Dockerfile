@@ -29,9 +29,15 @@ RUN apk add --no-cache \
     tar \
     ca-certificates
 
-# Install Atlas Semantic Code Graph Engine (v1.7.0 universal binary)
-RUN curl -fsSL https://github.com/LordCasser/atlas/releases/download/v1.7.0/atlas-linux-x86_64.tar.gz | tar -xz -C /usr/local/bin \
-    && chmod +x /usr/local/bin/atlas
+# Install Atlas Semantic Code Graph Engine (v1.7.0 multi-arch binary)
+RUN ARCH=$(uname -m) && \
+    if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then \
+      ATLAS_ASSET="atlas-linux-arm64.tar.gz"; \
+    else \
+      ATLAS_ASSET="atlas-linux-x86_64.tar.gz"; \
+    fi && \
+    curl -fsSL "https://github.com/LordCasser/atlas/releases/download/v1.7.0/${ATLAS_ASSET}" | tar -xz -C /usr/local/bin && \
+    chmod +x /usr/local/bin/atlas
 
 # Install OpenCode AI Agent CLI globally inside the unified container
 RUN npm install -g opencode-ai@1.18.35

@@ -1,4 +1,3 @@
-import * as vscode from "vscode";
 import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
@@ -20,11 +19,14 @@ export class SecurityToolManager {
   private static instance: SecurityToolManager;
   private storagePath: string;
   private binDir: string;
+  private extensionPath: string | null;
   private cachedPaths: InstalledToolPaths = {};
 
   private constructor() {
-    this.storagePath = path.join(os.homedir(), ".codesentinel");
+    this.storagePath =
+      process.env.CODESENTINEL_STORAGE_PATH || path.join(os.homedir(), ".codesentinel");
     this.binDir = path.join(this.storagePath, "bin");
+    this.extensionPath = process.env.CODESENTINEL_EXTENSION_PATH || null;
   }
 
   public static getInstance(): SecurityToolManager {
@@ -40,6 +42,10 @@ export class SecurityToolManager {
     try {
       fs.mkdirSync(this.binDir, { recursive: true });
     } catch {}
+  }
+
+  public setExtensionPath(extPath: string): void {
+    this.extensionPath = extPath;
   }
 
   public getBinDir(): string {
@@ -77,13 +83,14 @@ export class SecurityToolManager {
     }
 
     // 2. Look for bundled rules inside extension resources/rules/
+    const envExtPath = this.extensionPath || process.env.CODESENTINEL_EXTENSION_PATH;
     const candidatePaths = [
+      ...(envExtPath ? [path.join(envExtPath, "resources", "rules", fileName)] : []),
       path.join(__dirname, "..", "..", "resources", "rules", fileName),
       path.join(__dirname, "..", "resources", "rules", fileName),
       path.join(__dirname, "resources", "rules", fileName),
       path.resolve(__dirname, "..", "..", "resources", "rules", fileName),
       path.resolve("resources", "rules", fileName),
-      path.join("D:\\CODESENTINELVSCODE", "resources", "rules", fileName),
     ];
 
     for (const cand of candidatePaths) {
@@ -218,8 +225,10 @@ export class SecurityToolManager {
           await execAsync(`tar -xf "${archivePath}" -C "${destDir}"`, { timeout: 15000 });
         } catch {
           // Fallback to powershell with non-interactive flag and strict 30s timeout
+          const safeArchive = archivePath.replace(/'/g, "''");
+          const safeDest = destDir.replace(/'/g, "''");
           await execAsync(
-            `powershell -NoProfile -NonInteractive -Command "Expand-Archive -Path '${archivePath}' -DestinationPath '${destDir}' -Force"`,
+            `powershell -NoProfile -NonInteractive -Command "Expand-Archive -LiteralPath '${safeArchive}' -DestinationPath '${safeDest}' -Force"`,
             { timeout: 30000 }
           );
         }
@@ -333,8 +342,8 @@ export class SecurityToolManager {
           coreAssetUrl = `https://github.com/opengrep/opengrep/releases/download/v1.31.0/opengrep-core_osx_${isArm ? "aarch64" : "x86"}.tar.gz`;
           coreArchiveName = `opengrep-core_osx_${isArm ? "aarch64" : "x86"}.tar.gz`;
         } else {
-          coreAssetUrl = "https://github.com/opengrep/opengrep/releases/download/v1.31.0/opengrep-core_linux_x86.tar.gz";
-          coreArchiveName = "opengrep-core_linux_x86.tar.gz";
+          coreAssetUrl = `https://github.com/opengrep/opengrep/releases/download/v1.31.0/opengrep-core_linux_${isArm ? "aarch64" : "x86"}.tar.gz`;
+          coreArchiveName = `opengrep-core_linux_${isArm ? "aarch64" : "x86"}.tar.gz`;
         }
 
         const archivePath = path.join(binDir, coreArchiveName);
@@ -389,21 +398,32 @@ export class SecurityToolManager {
       if (onLog) onLog("Provisioning Gitleaks dedicated secret scanner into user tools directory...");
       let assetUrl = "";
       let archiveName = "";
+      const isArm = process.arch === "arm64";
 
       if (isWin) {
-        assetUrl = "https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_windows_x64.zip";
-        archiveName = "gitleaks_8.21.2_windows_x64.zip";
+        assetUrl = `https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_windows_${isArm ? "arm64" : "x64"}.zip`;
+        archiveName = `gitleaks_8.21.2_windows_${isArm ? "arm64" : "x64"}.zip`;
       } else if (process.platform === "darwin") {
-        const isArm = process.arch === "arm64";
         assetUrl = `https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_darwin_${isArm ? "arm64" : "x64"}.tar.gz`;
         archiveName = `gitleaks_8.21.2_darwin_${isArm ? "arm64" : "x64"}.tar.gz`;
       } else {
-        assetUrl = "https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz";
-        archiveName = "gitleaks_8.21.2_linux_x64.tar.gz";
+        assetUrl = `https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_${isArm ? "arm64" : "x64"}.tar.gz`;
+        archiveName = `gitleaks_8.21.2_linux_${isArm ? "arm64" : "x64"}.tar.gz`;
       }
 
       const archivePath = path.join(binDir, archiveName);
-      await this.downloadFile(assetUrl, archivePath);
+      try {
+        await this.downloadFile(assetUrl, archivePath);
+      } catch (dlErr) {
+        if (isWin && isArm) {
+          await this.downloadFile(
+            "https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_windows_x64.zip",
+            archivePath
+          );
+        } else {
+          throw dlErr;
+        }
+      }
       await this.unpackArchive(archivePath, binDir);
 
       if (!isWin && fs.existsSync(localExe)) {
@@ -452,17 +472,29 @@ export class SecurityToolManager {
     try {
       if (onLog) onLog("Provisioning Google OSV-Scanner into user tools directory...");
       let assetUrl = "";
+      const isArm = process.arch === "arm64";
 
       if (isWin) {
-        assetUrl = "https://github.com/google/osv-scanner/releases/download/v1.9.2/osv-scanner_windows_amd64.exe";
+        assetUrl = `https://github.com/google/osv-scanner/releases/download/v1.9.2/osv-scanner_windows_${isArm ? "arm64" : "amd64"}.exe`;
       } else if (process.platform === "darwin") {
-        const isArm = process.arch === "arm64";
         assetUrl = `https://github.com/google/osv-scanner/releases/download/v1.9.2/osv-scanner_darwin_${isArm ? "arm64" : "amd64"}`;
       } else {
-        assetUrl = "https://github.com/google/osv-scanner/releases/download/v1.9.2/osv-scanner_linux_amd64";
+        assetUrl = `https://github.com/google/osv-scanner/releases/download/v1.9.2/osv-scanner_linux_${isArm ? "arm64" : "amd64"}`;
       }
 
-      await this.downloadFile(assetUrl, localExe);
+      try {
+        await this.downloadFile(assetUrl, localExe);
+      } catch (dlErr) {
+        // Fallback for Windows ARM64 -> amd64 if native arm64 exe is not published on release
+        if (isWin && isArm) {
+          await this.downloadFile(
+            "https://github.com/google/osv-scanner/releases/download/v1.9.2/osv-scanner_windows_amd64.exe",
+            localExe
+          );
+        } else {
+          throw dlErr;
+        }
+      }
       if (!isWin && fs.existsSync(localExe)) {
         try { fs.chmodSync(localExe, 0o755); } catch {}
       }
@@ -493,41 +525,51 @@ export class SecurityToolManager {
     // Core always-excluded path patterns (Windows forward-slash and backslash safe)
     const corePatterns = [
       "(^|[/\\\\])node_modules([/\\\\]|$)",
-      "(^|[/\\\\])\.git([/\\\\]|$)",
-      "(^|[/\\\\])\.opencode([/\\\\]|$)",
+      "(^|[/\\\\])\\.git([/\\\\]|$)",
+      "(^|[/\\\\])\\.opencode([/\\\\]|$)",
+      "(^|[/\\\\])\\.codesentinel([/\\\\]|$)",
       "(^|[/\\\\])dist([/\\\\]|$)",
       "(^|[/\\\\])build([/\\\\]|$)",
       "(^|[/\\\\])out([/\\\\]|$)",
       "(^|[/\\\\])vendor([/\\\\]|$)",
-      "(^|[/\\\\])\.venv([/\\\\]|$)",
+      "(^|[/\\\\])\\.venv([/\\\\]|$)",
       "(^|[/\\\\])venv([/\\\\]|$)",
-      "(^|[/\\\\])\.cache([/\\\\]|$)",
-      "(^|[/\\\\])\.next([/\\\\]|$)",
-      "(^|[/\\\\])\.nuxt([/\\\\]|$)",
+      "(^|[/\\\\])\\.cache([/\\\\]|$)",
+      "(^|[/\\\\])\\.next([/\\\\]|$)",
+      "(^|[/\\\\])\\.nuxt([/\\\\]|$)",
       "(^|[/\\\\])__pycache__([/\\\\]|$)",
       "(^|[/\\\\])coverage([/\\\\]|$)",
-      "(^|[/\\\\])\.gradle([/\\\\]|$)",
+      "(^|[/\\\\])\\.gradle([/\\\\]|$)",
       "(^|[/\\\\])target([/\\\\]|$)",
-      "(^|[/\\\\])\.atlas([/\\\\]|$)",
-      "(^|[/\\\\])\.vscode([/\\\\]|$)",
+      "(^|[/\\\\])\\.atlas([/\\\\]|$)",
+      "(^|[/\\\\])\\.vscode([/\\\\]|$)",
       "\\.min\\.js$",
       "\\.map$",
       "\\.lock$",
     ];
 
-    // Convert gitignore relative paths to safe path-regex patterns
+    // Convert gitignore relative glob paths to valid Go regexp patterns
     const extraPatterns: string[] = [];
     for (const rel of extraIgnoredRelPaths) {
-      if (!rel || rel.startsWith("#")) continue;
-      // Escape for use inside TOML regex: backslash → double-backslash
-      const escaped = rel.replace(/\\/g, "/").replace(/[.+^${}()|[\]]/g, "\\$&");
-      extraPatterns.push(`(^|[/\\\\])${escaped}([/\\\\]|$)`);
+      const trimmed = rel ? rel.trim() : "";
+      if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("!")) continue;
+      const cleanGlob = trimmed.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+      if (!cleanGlob) continue;
+      const regexBody = cleanGlob
+        .replace(/[.+^${}()|[\]]/g, "\\$&")
+        .replace(/\*\*/g, ".*")
+        .replace(/(?<!\.)\*/g, "[^/\\\\]*")
+        .replace(/\?/g, "[^/\\\\]");
+      extraPatterns.push(`(^|[/\\\\])${regexBody}([/\\\\]|$)`);
     }
 
     const allPatterns = [...corePatterns, ...extraPatterns];
     const pathLines = allPatterns.map((p) => `  '''${p}'''`).join(",\n");
 
-    return `[allowlist]
+    return `[extend]
+useDefault = true
+
+[allowlist]
   description = "CodeSentinel auto-generated: exclude non-source paths"
   paths = [
 ${pathLines}
@@ -681,13 +723,31 @@ ${pathLines}
   /**
    * Write a .semgrepignore file to the workspace root so Opengrep/Semgrep's
    * native OCaml traversal engine skips all excluded directories automatically.
-   * This is orders-of-magnitude faster than manually filtering per-file.
+   * Preserves any existing user .semgrepignore content and returns a cleanup callback
+   * that restores the original file (or removes the temporary file if none existed).
    */
   private writeSemgrepignore(
     workspaceRoot: string,
     gitignoreRules: string[]
-  ): string {
+  ): { ignoreFilePath: string; restore: () => void } {
     const ignoreFilePath = path.join(workspaceRoot, ".semgrepignore");
+    let hadExisting = false;
+    let originalContent = "";
+    const existingLines: string[] = [];
+
+    if (fs.existsSync(ignoreFilePath)) {
+      try {
+        originalContent = fs.readFileSync(ignoreFilePath, "utf-8");
+        hadExisting = true;
+        for (const l of originalContent.split(/\r?\n/)) {
+          const trimmed = l.trim();
+          if (trimmed && !trimmed.startsWith("#")) {
+            existingLines.push(trimmed);
+          }
+        }
+      } catch {}
+    }
+
     const standardDirs = [
       "node_modules/",
       ".git/",
@@ -718,10 +778,10 @@ ${pathLines}
       "*.jar",
     ];
 
-    // Merge standard + gitignore-derived patterns, deduplicated
+    // Merge standard + existing .semgrepignore + gitignore-derived patterns, deduplicated
     const seen = new Set<string>(standardDirs);
     const lines: string[] = [...standardDirs];
-    for (const rule of gitignoreRules) {
+    for (const rule of [...existingLines, ...gitignoreRules]) {
       const trimmed = rule.trim();
       if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("!")) continue;
       if (!seen.has(trimmed)) {
@@ -733,7 +793,18 @@ ${pathLines}
     try {
       fs.writeFileSync(ignoreFilePath, lines.join("\n") + "\n", "utf-8");
     } catch {}
-    return ignoreFilePath;
+
+    const restore = () => {
+      try {
+        if (hadExisting) {
+          fs.writeFileSync(ignoreFilePath, originalContent, "utf-8");
+        } else if (fs.existsSync(ignoreFilePath)) {
+          fs.unlinkSync(ignoreFilePath);
+        }
+      } catch {}
+    };
+
+    return { ignoreFilePath, restore };
   }
 
   /**
@@ -759,22 +830,26 @@ ${pathLines}
 
     const localAuditRule = this.getLocalRulePath("security-audit");
     const localDefaultRule = this.getLocalRulePath("default");
-    let semgrepignorePath = "";
+    let restoreSemgrepignore: (() => void) | null = null;
 
     // Build a Set for post-scan filtering
     const scannableSet = new Set(
       scannableFiles.map((f) => path.normalize(f).toLowerCase().replace(/\\/g, "/"))
     );
 
-    const parseAndAddResults = (stdoutText: string): void => {
-      if (!stdoutText || !stdoutText.trim()) return;
+    const parseAndAddResults = (stdoutText: string): boolean => {
+      if (!stdoutText || !stdoutText.trim()) return false;
       try {
         const firstBrace = stdoutText.indexOf("{");
         const lastBrace = stdoutText.lastIndexOf("}");
-        if (firstBrace === -1 || lastBrace === -1) return;
+        if (firstBrace === -1 || lastBrace === -1) return false;
         const jsonStr = stdoutText.slice(firstBrace, lastBrace + 1);
         const parsed = JSON.parse(jsonStr);
-        const results = parsed.results || (parsed.matches ? parsed.matches : []);
+        const results = parsed.results || (parsed.matches ? parsed.matches : null);
+        if (!Array.isArray(results)) return false;
+        if (results.length === 0 && Array.isArray(parsed.errors) && parsed.errors.length > 0) {
+          return false;
+        }
         for (let i = 0; i < results.length; i++) {
           const r = results[i];
           const rawItemPath = r.path || r.target || "";
@@ -858,45 +933,51 @@ ${pathLines}
             remediation,
           });
         }
-      } catch {}
+        return true;
+      } catch {
+        return false;
+      }
     };
 
     try {
       // Write .semgrepignore so native engine handles traversal exclusions across all languages
-      semgrepignorePath = this.writeSemgrepignore(workspaceRoot, gitignoreRules || []);
+      const semgrepignoreState = this.writeSemgrepignore(workspaceRoot, gitignoreRules || []);
+      restoreSemgrepignore = semgrepignoreState.restore;
 
       let auditRan = false;
       let defaultRan = false;
 
       // -----------------------------------------------------------------------
       // Phase 1: Security Audit Scan (Taint Tracking & High-Severity Sinks)
+      // Prefer local offline bundled security-audit ruleset first for deterministic
+      // zero-network speed across all PCs; fall back to remote registry if absent.
       // -----------------------------------------------------------------------
       onLog("Running Opengrep AST security-audit scan (taint tracking)...");
-      try {
-        const cmd = `"${opengrepCmd}" scan --config p/security-audit --taint-intrafile --quiet --json "."`;
-        const { stdout } = await execAsync(cmd, { cwd: workspaceRoot, maxBuffer: 30 * 1024 * 1024, timeout: 35000 });
-        parseAndAddResults(stdout);
-        auditRan = true;
-        onLog(`Opengrep security-audit registry scan complete: ${findings.length} finding(s) detected.`);
-      } catch (regErr: any) {
-        if (regErr.stdout && regErr.stdout.trim().startsWith("{")) {
-          parseAndAddResults(regErr.stdout);
-          auditRan = true;
+      if (localAuditRule) {
+        try {
+          const cmd = `"${opengrepCmd}" scan --config "${localAuditRule}" --taint-intrafile --quiet --json "."`;
+          const { stdout } = await execAsync(cmd, { cwd: workspaceRoot, maxBuffer: 30 * 1024 * 1024, timeout: 120000 });
+          if (parseAndAddResults(stdout)) {
+            auditRan = true;
+            onLog(`Opengrep local security-audit scan complete: ${findings.length} finding(s) detected.`);
+          }
+        } catch (locErr: any) {
+          if (locErr.stdout && parseAndAddResults(locErr.stdout)) {
+            auditRan = true;
+          }
         }
       }
 
-      // 1b. If remote registry was unreachable or offline, automatically use local offline security-audit rule pack
-      if (!auditRan && localAuditRule) {
+      if (!auditRan) {
         try {
-          onLog("Remote registry unreachable or offline; using local cached security-audit ruleset fallback...");
-          const cmd = `"${opengrepCmd}" scan --config "${localAuditRule}" --taint-intrafile --quiet --json "."`;
-          const { stdout } = await execAsync(cmd, { cwd: workspaceRoot, maxBuffer: 30 * 1024 * 1024, timeout: 120000 });
-          parseAndAddResults(stdout);
-          auditRan = true;
-          onLog(`Opengrep local security-audit fallback scan complete: ${findings.length} finding(s) detected.`);
-        } catch (locErr: any) {
-          if (locErr.stdout && locErr.stdout.trim().startsWith("{")) {
-            parseAndAddResults(locErr.stdout);
+          const cmd = `"${opengrepCmd}" scan --config p/security-audit --taint-intrafile --quiet --json "."`;
+          const { stdout } = await execAsync(cmd, { cwd: workspaceRoot, maxBuffer: 30 * 1024 * 1024, timeout: 35000 });
+          if (parseAndAddResults(stdout)) {
+            auditRan = true;
+            onLog(`Opengrep security-audit registry scan complete: ${findings.length} finding(s) detected.`);
+          }
+        } catch (regErr: any) {
+          if (regErr.stdout && parseAndAddResults(regErr.stdout)) {
             auditRan = true;
           }
         }
@@ -904,36 +985,37 @@ ${pathLines}
 
       // -----------------------------------------------------------------------
       // Phase 2: Comprehensive Multi-Language Default Ruleset Scan
+      // Prefer local offline bundled default ruleset first; fall back to remote p/default.
       // -----------------------------------------------------------------------
       onLog("Running Opengrep AST multi-language default ruleset scan...");
       const priorCount = findings.length;
-      try {
-        const cmd = `"${opengrepCmd}" scan --config p/default --quiet --json "."`;
-        const { stdout } = await execAsync(cmd, { cwd: workspaceRoot, maxBuffer: 30 * 1024 * 1024, timeout: 35000 });
-        parseAndAddResults(stdout);
-        defaultRan = true;
-        const newFindings = findings.length - priorCount;
-        onLog(`Opengrep default registry scan complete: added ${newFindings} finding(s).`);
-      } catch (defErr: any) {
-        if (defErr.stdout && defErr.stdout.trim().startsWith("{")) {
-          parseAndAddResults(defErr.stdout);
-          defaultRan = true;
+      if (localDefaultRule) {
+        try {
+          const cmd = `"${opengrepCmd}" scan --config "${localDefaultRule}" --quiet --json "."`;
+          const { stdout } = await execAsync(cmd, { cwd: workspaceRoot, maxBuffer: 30 * 1024 * 1024, timeout: 120000 });
+          if (parseAndAddResults(stdout)) {
+            defaultRan = true;
+            const newFindings = findings.length - priorCount;
+            onLog(`Opengrep local default ruleset scan complete: added ${newFindings} finding(s).`);
+          }
+        } catch (locDefErr: any) {
+          if (locDefErr.stdout && parseAndAddResults(locDefErr.stdout)) {
+            defaultRan = true;
+          }
         }
       }
 
-      // 2b. If remote p/default was unreachable or offline, automatically use local offline default rule pack
-      if (!defaultRan && localDefaultRule) {
+      if (!defaultRan) {
         try {
-          onLog("Remote default registry unreachable or offline; using local cached default ruleset fallback...");
-          const cmd = `"${opengrepCmd}" scan --config "${localDefaultRule}" --quiet --json "."`;
-          const { stdout } = await execAsync(cmd, { cwd: workspaceRoot, maxBuffer: 30 * 1024 * 1024, timeout: 120000 });
-          parseAndAddResults(stdout);
-          defaultRan = true;
-          const newFindings = findings.length - priorCount;
-          onLog(`Opengrep local default fallback scan complete: added ${newFindings} finding(s).`);
-        } catch (locDefErr: any) {
-          if (locDefErr.stdout && locDefErr.stdout.trim().startsWith("{")) {
-            parseAndAddResults(locDefErr.stdout);
+          const cmd = `"${opengrepCmd}" scan --config p/default --quiet --json "."`;
+          const { stdout } = await execAsync(cmd, { cwd: workspaceRoot, maxBuffer: 30 * 1024 * 1024, timeout: 35000 });
+          if (parseAndAddResults(stdout)) {
+            defaultRan = true;
+            const newFindings = findings.length - priorCount;
+            onLog(`Opengrep default registry scan complete: added ${newFindings} finding(s).`);
+          }
+        } catch (defErr: any) {
+          if (defErr.stdout && parseAndAddResults(defErr.stdout)) {
             defaultRan = true;
           }
         }
@@ -957,8 +1039,8 @@ ${pathLines}
     } catch (e: any) {
       onLog(`Opengrep execution notice: ${e.message}`);
     } finally {
-      if (semgrepignorePath) {
-        try { fs.unlinkSync(semgrepignorePath); } catch {}
+      if (restoreSemgrepignore) {
+        restoreSemgrepignore();
       }
     }
 
