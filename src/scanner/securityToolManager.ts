@@ -948,12 +948,43 @@ ${pathLines}
       let defaultRan = false;
 
       // -----------------------------------------------------------------------
+      // Fast-Path Single-Pass Combined Scan:
+      // When both local bundled rule packs (security-audit + default) exist,
+      // invoke Opengrep ONCE with both --config flags so the OCaml AST parser
+      // parses each workspace source file only once (~50% faster scan time).
+      // -----------------------------------------------------------------------
+      if (localAuditRule && localDefaultRule) {
+        onLog("Running Opengrep single-pass combined AST scan (security-audit + default rulesets)...");
+        try {
+          const combinedCmd = `"${opengrepCmd}" scan --config "${localAuditRule}" --config "${localDefaultRule}" --taint-intrafile --quiet --json "."`;
+          const { stdout } = await execAsync(combinedCmd, {
+            cwd: workspaceRoot,
+            maxBuffer: 40 * 1024 * 1024,
+            timeout: 150000,
+          });
+          if (parseAndAddResults(stdout)) {
+            auditRan = true;
+            defaultRan = true;
+            onLog(`Opengrep combined single-pass AST scan complete: ${findings.length} finding(s) detected.`);
+          }
+        } catch (combErr: any) {
+          if (combErr.stdout && parseAndAddResults(combErr.stdout)) {
+            auditRan = true;
+            defaultRan = true;
+            onLog(`Opengrep combined single-pass AST scan complete: ${findings.length} finding(s) detected.`);
+          }
+        }
+      }
+
+      // -----------------------------------------------------------------------
       // Phase 1: Security Audit Scan (Taint Tracking & High-Severity Sinks)
       // Prefer local offline bundled security-audit ruleset first for deterministic
       // zero-network speed across all PCs; fall back to remote registry if absent.
       // -----------------------------------------------------------------------
-      onLog("Running Opengrep AST security-audit scan (taint tracking)...");
-      if (localAuditRule) {
+      if (!auditRan) {
+        onLog("Running Opengrep AST security-audit scan (taint tracking)...");
+      }
+      if (!auditRan && localAuditRule) {
         try {
           const cmd = `"${opengrepCmd}" scan --config "${localAuditRule}" --taint-intrafile --quiet --json "."`;
           const { stdout } = await execAsync(cmd, { cwd: workspaceRoot, maxBuffer: 30 * 1024 * 1024, timeout: 120000 });
@@ -987,9 +1018,11 @@ ${pathLines}
       // Phase 2: Comprehensive Multi-Language Default Ruleset Scan
       // Prefer local offline bundled default ruleset first; fall back to remote p/default.
       // -----------------------------------------------------------------------
-      onLog("Running Opengrep AST multi-language default ruleset scan...");
+      if (!defaultRan) {
+        onLog("Running Opengrep AST multi-language default ruleset scan...");
+      }
       const priorCount = findings.length;
-      if (localDefaultRule) {
+      if (!defaultRan && localDefaultRule) {
         try {
           const cmd = `"${opengrepCmd}" scan --config "${localDefaultRule}" --quiet --json "."`;
           const { stdout } = await execAsync(cmd, { cwd: workspaceRoot, maxBuffer: 30 * 1024 * 1024, timeout: 120000 });

@@ -8,6 +8,7 @@ import { promisify } from "util";
 import { OpenCodeMcpConfig } from "../types";
 import { DockerClient } from "../docker/dockerClient";
 import { DependencyManager } from "../services/dependencyManager";
+import { HarnessRegistry } from "../harness/harnessRegistry";
 
 const execAsync = promisify(exec);
 
@@ -207,13 +208,11 @@ export class OpenCodeLauncher {
       mcpTimeoutMs = options?.timeout ?? config.get<number>("mcpTimeout", 600000);
     } catch {}
 
-    // Configure global OpenCode MCP timeouts:
-    // startup: 60s, catalog: 60s, execution: 10m (600,000ms) for heavy security scans
-    currentConfig.mcp["timeout"] = {
-      startup: 60000,
-      catalog: 60000,
-      execution: mcpTimeoutMs,
-    };
+    // Remove legacy top-level mcp.timeout object (unsupported in OpenCode v1.19+ schema;
+    // timeout is configured per-server on mcp.codesentinel.timeout and mcp.atlas.timeout)
+    if (currentConfig.mcp && "timeout" in currentConfig.mcp) {
+      delete currentConfig.mcp["timeout"];
+    }
 
     // Normalize path with forward slashes for cross-platform Docker mount compatibility
     const normalizedMount = workspaceRoot.replace(/\\/g, "/");
@@ -260,6 +259,21 @@ export class OpenCodeLauncher {
 
     // Configure Atlas Semantic Code Graph MCP Server via host runtime bridge.
     // Zero Docker containers required: directly interacts with host .atlas/atlas.db.
+    const runtimeCmd = HarnessRegistry.getInstance().buildMcpRuntimeCommand(
+      workspaceRoot,
+      mcpServerScriptPath,
+      extensionRoot
+    );
+    if (!useDocker) {
+      currentConfig.mcp["codesentinel"] = {
+        type: "local",
+        command: [runtimeCmd.command, ...runtimeCmd.args],
+        enabled: true,
+        timeout: mcpTimeoutMs,
+        environment: runtimeCmd.env,
+      };
+    }
+
     const bridgeScriptPath = path.join(
       path.dirname(mcpServerScriptPath),
       "atlas-bridge.js"
@@ -267,21 +281,18 @@ export class OpenCodeLauncher {
     currentConfig.mcp["atlas"] = {
       type: "local",
       command: [
-        "node",
+        runtimeCmd.command,
         bridgeScriptPath,
         "local",
         normalizedMount,
       ],
       enabled: true,
       timeout: mcpTimeoutMs,
-      environment: {
-        CODESENTINEL_WORKSPACE: workspaceRoot,
-        CODESENTINEL_STORAGE_PATH: DependencyManager.getInstance().getStoragePath(),
-        CODESENTINEL_EXTENSION_PATH: extensionRoot,
-      },
+      environment: runtimeCmd.env,
     };
 
     fs.writeFileSync(configPath, JSON.stringify(currentConfig, null, 2), "utf-8");
+    HarnessRegistry.getInstance().ensureGitInfoExclude(workspaceRoot, [".codesentinel/", "opencode.json"]);
     return configPath;
   }
 
@@ -412,6 +423,7 @@ export class OpenCodeLauncher {
       if (!fs.existsSync(sentinelGitignore)) {
         try { fs.writeFileSync(sentinelGitignore, "*\n", "utf-8"); } catch {}
       }
+      HarnessRegistry.getInstance().ensureGitInfoExclude(workspaceRoot, [".codesentinel/"]);
 
       const sentinelDb = path.join(sentinelDir, "atlas.db");
       const legacyDb = path.join(workspaceRoot, ".atlas", "atlas.db");
@@ -438,6 +450,9 @@ export class OpenCodeLauncher {
       }
 
       const excludeArgs = this.buildAtlasExcludeArgs(workspaceRoot);
+
+      // Wait for any in-flight initial dependency provisioning before resolving Atlas
+      await DependencyManager.getInstance().waitForDependencies();
 
       // Prioritize host-native Atlas binary from self-contained extension storage
       let atlasCmd = await DependencyManager.getInstance().getAtlasCommand();
@@ -589,10 +604,58 @@ export class OpenCodeLauncher {
     return path.normalize(dir).replace(/[\\/]+$/, "").toLowerCase();
   }
 
+  /**
+   * Cleans up stale OpenCode state lockfiles (`~/.local/state/opencode/locks/*.lock`)
+   * whose owning PID is no longer alive, preventing OpenCode v1.19+ from throwing
+   * `ReleaseError: token mismatch` / `metadata missing` and returning HTTP 499 on `/command`.
+   */
+  public cleanupStaleOpenCodeLocks(): void {
+    try {
+      const homedir = os.homedir();
+      if (!homedir) return;
+      const locksDir = path.join(homedir, ".local", "state", "opencode", "locks");
+      if (!fs.existsSync(locksDir)) return;
+
+      const entries = fs.readdirSync(locksDir, { withFileTypes: true });
+      for (const entry of entries) {
+        const lockPath = path.join(locksDir, entry.name);
+        if (!entry.isDirectory()) continue;
+        const metaPath = path.join(lockPath, "meta.json");
+        let shouldRemove = false;
+        if (fs.existsSync(metaPath)) {
+          try {
+            const meta = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
+            const pid = Number(meta?.pid);
+            if (pid > 0) {
+              try {
+                process.kill(pid, 0);
+              } catch (e: any) {
+                if (e?.code === "ESRCH") {
+                  shouldRemove = true;
+                }
+              }
+            } else {
+              shouldRemove = true;
+            }
+          } catch {
+            shouldRemove = true;
+          }
+        } else {
+          shouldRemove = true;
+        }
+        if (shouldRemove) {
+          try {
+            fs.rmSync(lockPath, { recursive: true, force: true });
+          } catch {}
+        }
+      }
+    } catch {}
+  }
+
   /** Returns the default directory an OpenCode server on `port` is bound to, or null if none responds. */
   public async getServerDirectory(port: number): Promise<string | null> {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 600);
+    const timeoutId = setTimeout(() => controller.abort(), 1200);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/path`, { signal: controller.signal });
       if (!res.ok) return null;
@@ -600,6 +663,32 @@ export class OpenCodeLauncher {
       return typeof info?.directory === "string" ? info.directory : null;
     } catch {
       return null;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  /**
+   * Verifies that the OpenCode server's workspace instance (`/command` and `/config/providers`)
+   * is fully warmed up and responding with HTTP 200 (not 499 while bootstrapping MCP / skills / models).
+   */
+  public async isServerWorkspaceReady(port: number, workspaceRoot: string): Promise<boolean> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+    try {
+      const canonicalRoot = this.canonicalizeWorkspacePath(workspaceRoot);
+      const encodedDir = encodeURIComponent(canonicalRoot);
+      const [cmdRes, provRes] = await Promise.all([
+        fetch(`http://127.0.0.1:${port}/command?directory=${encodedDir}`, {
+          signal: controller.signal,
+        }),
+        fetch(`http://127.0.0.1:${port}/config/providers?directory=${encodedDir}`, {
+          signal: controller.signal,
+        }),
+      ]);
+      return cmdRes.ok && provRes.ok;
+    } catch {
+      return false;
     } finally {
       clearTimeout(timeoutId);
     }
@@ -689,6 +778,12 @@ export class OpenCodeLauncher {
     this.webPort = port;
     this.activeWorkspaceRoot = workspaceRoot;
     this.webProcess = proc;
+    for (let w = 0; w < 6; w++) {
+      if (await this.isServerWorkspaceReady(port, workspaceRoot)) {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 300));
+    }
     const sessionUrl = await this.ensureWorkspaceSession(workspaceRoot, port);
     this.webServerUrl = sessionUrl;
     return { url: sessionUrl, port, pid: proc?.pid };
@@ -719,22 +814,67 @@ export class OpenCodeLauncher {
     }
 
     // 3. Spawn a brand new server whose working directory is this workspace.
-    // Ensure bundled skills (e.g. cloud-security-audit) are provisioned before starting server
-    this.provisionSkills(workspaceRoot).catch(() => {});
+    // Wait for any active first-time dependency downloads before attempting to spawn OpenCode
+    await DependencyManager.getInstance().waitForDependencies();
+
+    // Clean up any orphaned OpenCode state locks, pre-populate free models if empty, and provision skills
+    this.cleanupStaleOpenCodeLocks();
+    this.ensureFreeModelsState();
+    await this.provisionSkills(workspaceRoot).catch(() => {});
 
     const config = vscode.workspace.getConfiguration("codesentinel");
     const preferredPort = port ?? config.get<number>("opencodeWebPort", 5123);
     const targetPort = await this.findFreePort(preferredPort);
 
-    const opencodeCmd = this.getOpencodeCommand();
-    const safeCmd =
-      opencodeCmd.includes(" ") && !opencodeCmd.startsWith('"')
-        ? `"${opencodeCmd}"`
-        : opencodeCmd;
+    // Ensure opencode binary exists in self-contained storage (or PATH) before spawning
+    let opencodeCmd = await DependencyManager.getInstance().getOpencodeCommand();
+    if (!opencodeCmd || (opencodeCmd !== "opencode" && !fs.existsSync(opencodeCmd))) {
+      try {
+        opencodeCmd = await DependencyManager.getInstance().installOpenCode(
+          DependencyManager.getInstance().getStoragePath()
+        );
+      } catch (installErr: any) {
+        console.warn("Auto-install OpenCode during startWebProcess notice:", installErr?.message);
+      }
+    }
+    if (!opencodeCmd || (opencodeCmd !== "opencode" && !fs.existsSync(opencodeCmd))) {
+      opencodeCmd = this.getOpencodeCommand();
+    }
+
+    // If opencodeCmd is still bare "opencode", verify it is actually installed on PATH; if not, force install into storage
+    if (opencodeCmd === "opencode") {
+      const check = await this.checkOpenCodeInstalled("opencode");
+      if (!check.installed) {
+        opencodeCmd = await DependencyManager.getInstance().installOpenCode(
+          DependencyManager.getInstance().getStoragePath()
+        );
+      }
+    }
+
+    if (opencodeCmd !== "opencode" && !fs.existsSync(opencodeCmd)) {
+      throw new Error(
+        `OpenCode binary is still being installed or could not be found at ${opencodeCmd}. Please wait for dependency setup to finish.`
+      );
+    }
+
+    const isDirectBinary =
+      opencodeCmd !== "opencode" &&
+      fs.existsSync(opencodeCmd) &&
+      !opencodeCmd.toLowerCase().endsWith(".cmd") &&
+      !opencodeCmd.toLowerCase().endsWith(".bat");
+
+    const spawnCmd = isDirectBinary
+      ? opencodeCmd
+      : opencodeCmd.includes(" ") && !opencodeCmd.startsWith('"')
+      ? `"${opencodeCmd}"`
+      : opencodeCmd;
+
     return new Promise((resolve, reject) => {
       let resolved = false;
+      let pollInFlight = false;
       let pollInterval: NodeJS.Timeout | null = null;
       let failTimeout: NodeJS.Timeout | null = null;
+      let stderrLog = "";
 
       const finishStartup = async (pid?: number) => {
         if (resolved) return;
@@ -745,47 +885,64 @@ export class OpenCodeLauncher {
         this.activeWorkspaceRoot = workspaceRoot;
         this.webProcess = proc;
         this.webServers.set(key, { port: targetPort, proc });
+        // Warm up /command and session before resolving so the webview iframe never hits HTTP 499
+        for (let w = 0; w < 8; w++) {
+          if (await this.isServerWorkspaceReady(targetPort, workspaceRoot)) {
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 350));
+        }
         const sessionUrl = await this.ensureWorkspaceSession(workspaceRoot, targetPort);
         this.webServerUrl = sessionUrl;
         resolve({ url: sessionUrl, port: targetPort, pid });
       };
 
       const proc = spawn(
-        safeCmd,
+        spawnCmd,
         ["serve", "--port", targetPort.toString(), "--hostname", "127.0.0.1"],
         {
-          cwd: workspaceRoot,
-          shell: true,
+          cwd: this.canonicalizeWorkspacePath(workspaceRoot),
+          shell: !isDirectBinary,
+          windowsHide: true,
           stdio: "pipe",
           env: DependencyManager.getInstance().getEnvWithBinPath({
             BROWSER: "none",
-            CODESENTINEL_WORKSPACE: workspaceRoot,
+            CODESENTINEL_WORKSPACE: this.canonicalizeWorkspacePath(workspaceRoot),
           }),
         }
       );
 
       this.webProcess = proc;
 
-      // Fast polling on /path to resolve as soon as OpenCode is listening
+      // Fast polling on /path + /command readiness to resolve as soon as OpenCode is listening
       let attempts = 0;
       pollInterval = setInterval(async () => {
-        attempts++;
-        const dir = await this.getServerDirectory(targetPort);
-        if (dir && !resolved) {
-          finishStartup(proc.pid);
-        } else if (attempts >= 40) {
-          if (pollInterval) clearInterval(pollInterval);
+        if (pollInFlight || resolved) return;
+        pollInFlight = true;
+        try {
+          attempts++;
+          const dir = await this.getServerDirectory(targetPort);
+          if (dir && !resolved) {
+            finishStartup(proc.pid);
+          } else if (attempts >= 60) {
+            if (pollInterval) clearInterval(pollInterval);
+          }
+        } finally {
+          pollInFlight = false;
         }
-      }, 250);
+      }, 300);
 
       failTimeout = setTimeout(() => {
         if (!resolved) {
           finishStartup(proc.pid);
         }
-      }, 12000);
+      }, 18000);
 
       const handleOutput = (data: Buffer) => {
         const text = data.toString();
+        if (stderrLog.length < 1500) {
+          stderrLog += text;
+        }
         const match = text.match(/http:\/\/(?:127\.0\.0\.1|localhost):\d+\/?/);
         if (match && !resolved) {
           finishStartup(proc.pid);
@@ -819,25 +976,89 @@ export class OpenCodeLauncher {
           if (pollInterval) clearInterval(pollInterval);
           if (failTimeout) clearTimeout(failTimeout);
           this.webServerUrl = null;
-          reject(new Error(`OpenCode service exited prematurely with code ${code}`));
+          const detail = stderrLog.trim() ? ` (${stderrLog.trim().slice(0, 240)})` : "";
+          reject(new Error(`OpenCode service exited prematurely with code ${code}${detail}`));
         }
       });
     });
   }
 
   public encodeDirectory(dir: string): string {
-    const normalized = dir.replace(/\\/g, "/");
+    let normalized = dir.replace(/\\/g, "/");
+    if (process.platform === "win32" && /^[a-z]:\//.test(normalized)) {
+      normalized = normalized[0].toUpperCase() + normalized.slice(1);
+    }
     const buf = Buffer.from(normalized, "utf8");
     return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
   }
 
+  private canonicalizeWorkspacePath(workspaceRoot: string): string {
+    if (process.platform === "win32" && /^[a-z]:[\\/]/.test(workspaceRoot)) {
+      return workspaceRoot[0].toUpperCase() + workspaceRoot.slice(1);
+    }
+    return workspaceRoot;
+  }
+
+  /**
+   * Ensures `~/.local/state/opencode/model.json` has OpenCode's built-in free models
+   * pre-populated when `recent` / `favorite` are empty so a brand-new installation
+   * immediately displays all free models in the OpenCode selector without requiring
+   * manual hunting.
+   */
+  public ensureFreeModelsState(): void {
+    try {
+      const homedir = os.homedir();
+      if (!homedir) return;
+      const stateDir = path.join(homedir, ".local", "state", "opencode");
+      const modelJsonPath = path.join(stateDir, "model.json");
+
+      const defaultFreeModels = [
+        { providerID: "opencode", modelID: "big-pickle" },
+        { providerID: "opencode", modelID: "glm-5.3-flash-free" },
+        { providerID: "opencode", modelID: "deepseek-v4.1-flash-free" },
+        { providerID: "opencode", modelID: "mimo-v2.6-flash-free" },
+        { providerID: "opencode", modelID: "nemotron-3.5-super-vl-free" },
+        { providerID: "opencode", modelID: "nemotron-3.5-lightning-free" },
+        { providerID: "opencode", modelID: "flint-40b-free" },
+        { providerID: "opencode", modelID: "beam-free" },
+      ];
+
+      let state: any = {
+        recent: defaultFreeModels,
+        favorite: defaultFreeModels,
+        variant: {},
+      };
+
+      if (fs.existsSync(modelJsonPath)) {
+        try {
+          const parsed = JSON.parse(fs.readFileSync(modelJsonPath, "utf-8"));
+          const hasRecents = Array.isArray(parsed?.recent) && parsed.recent.length > 0;
+          const hasFavorites = Array.isArray(parsed?.favorite) && parsed.favorite.length > 0;
+          if (hasRecents || hasFavorites) {
+            return; // User already has active model selections; preserve them
+          }
+          state = {
+            ...parsed,
+            recent: defaultFreeModels,
+            favorite: defaultFreeModels,
+            variant: parsed?.variant && typeof parsed.variant === "object" ? parsed.variant : {},
+          };
+        } catch {}
+      }
+
+      fs.mkdirSync(stateDir, { recursive: true });
+      fs.writeFileSync(modelJsonPath, JSON.stringify(state, null, 2), "utf-8");
+    } catch {}
+  }
+
   public async ensureWorkspaceSession(workspaceRoot: string, port: number): Promise<string> {
     const baseUrl = `http://127.0.0.1:${port}/`;
-    const encodedDir = this.encodeDirectory(workspaceRoot);
+    const canonicalRoot = this.canonicalizeWorkspacePath(workspaceRoot);
+    const encodedDir = this.encodeDirectory(canonicalRoot);
     const fallbackUrl = `${baseUrl}${encodedDir}/session`;
 
     try {
-      const encodedHeader = encodeURIComponent(workspaceRoot);
+      const encodedHeader = encodeURIComponent(canonicalRoot);
       const headers: Record<string, string> = {
         "x-opencode-directory": encodedHeader,
         "Accept": "application/json",
@@ -881,40 +1102,40 @@ export class OpenCodeLauncher {
   public async stopWebProcess(): Promise<boolean> {
     let stopped = false;
 
-    // Clean up all tracked web servers
-    for (const [dir, server] of this.webServers.entries()) {
-      if (server.proc && !server.proc.killed) {
-        const pid = server.proc.pid;
-        if (process.platform === "win32" && pid) {
-          try {
-            await execAsync(`taskkill /pid ${pid} /T /F`);
-          } catch {
-            server.proc.kill();
-          }
-        } else {
-          server.proc.kill();
-        }
-        stopped = true;
+    const procsToStop = new Set<ChildProcess>();
+    for (const [, server] of this.webServers.entries()) {
+      if (server?.proc) {
+        procsToStop.add(server.proc);
       }
     }
-    this.webServers.clear();
+    if (this.webProcess) {
+      procsToStop.add(this.webProcess);
+    }
 
-    if (this.webProcess && !this.webProcess.killed) {
-      const pid = this.webProcess.pid;
+    this.webServers.clear();
+    this.webProcess = null;
+    this.webServerUrl = null;
+    this.activeWorkspaceRoot = null;
+
+    for (const proc of procsToStop) {
+      if (!proc || proc.killed) continue;
+      const pid = proc.pid;
       if (process.platform === "win32" && pid) {
         try {
           await execAsync(`taskkill /pid ${pid} /T /F`);
         } catch {
-          this.webProcess.kill();
+          try {
+            proc?.kill();
+          } catch {}
         }
       } else {
-        this.webProcess.kill();
+        try {
+          proc?.kill();
+        } catch {}
       }
-      this.webProcess = null;
       stopped = true;
     }
-    this.webServerUrl = null;
-    this.activeWorkspaceRoot = null;
+
     return stopped;
   }
 

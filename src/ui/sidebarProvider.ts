@@ -71,7 +71,30 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     webviewView.webview.html = this.getHtmlContent(webviewView.webview);
 
-    // Auto-launch OpenCode session for current repository when sidebar opens
+    // Immediately broadcast any active or recent dependency provisioning progress to the newly opened webview
+    import("../services/dependencyManager")
+      .then(({ DependencyManager }) => {
+        const dm = DependencyManager.getInstance();
+        const lastProgress = dm.getLastProgress();
+        if (lastProgress) {
+          this._view?.webview.postMessage({
+            command: "toolInstallProgress",
+            progress: lastProgress,
+          });
+        } else if (dm.isProvisioning()) {
+          this._view?.webview.postMessage({
+            command: "toolInstallProgress",
+            progress: {
+              stage: "Installing runtime tools",
+              percent: 15,
+              detail: "Downloading self-contained OpenCode AI Agent & Atlas Engine...",
+            },
+          });
+        }
+      })
+      .catch(() => {});
+
+    // Auto-launch OpenCode session for current repository when sidebar opens (after dependencies are ready)
     const workspace = this._workspaceManager.getContext();
     if (workspace) {
       const activeRoot = this._opencodeLauncher.getActiveWorkspaceRoot();
@@ -79,13 +102,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         path.normalize(activeRoot).toLowerCase() !== path.normalize(workspace.rootPath).toLowerCase();
 
       if (rootChanged || !this._opencodeLauncher.isWebRunning()) {
-        this._ensureMcpAndStart(workspace.rootPath)
+        import("../services/dependencyManager")
+          .then(({ DependencyManager }) => DependencyManager.getInstance().waitForDependencies())
+          .catch(() => {})
+          .then(() => this._ensureMcpAndStart(workspace.rootPath))
           .then((serverUrl) => {
             if (serverUrl && this._view) {
               this._view.webview.postMessage({ command: "setServerUrl", url: serverUrl });
             }
           })
-          .catch(() => { });
+          .catch(() => {});
       }
 
       // Automatically load previous vulnerability scan results from persistent cache
@@ -1621,7 +1647,31 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           transition: background 0.15s;
         }
 
-        button.btn-primary:hover { background: var(--btn-hover); }
+        button.btn-primary:hover:not(:disabled) { background: var(--btn-hover); }
+
+        button:disabled,
+        .icon-btn:disabled,
+        .pill-btn:disabled {
+          opacity: 0.45 !important;
+          cursor: not-allowed !important;
+          pointer-events: none !important;
+          filter: grayscale(55%);
+        }
+
+        .provisioning-callout {
+          background: rgba(245, 158, 11, 0.12);
+          border: 1px solid rgba(245, 158, 11, 0.4);
+          border-left: 3px solid #f59e0b;
+          border-radius: 6px;
+          padding: 10px 12px;
+          margin-bottom: 14px;
+          max-width: 280px;
+          text-align: left;
+          font-size: 11px;
+          line-height: 1.45;
+          color: #fde68a;
+          box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+        }
 
         button.btn-secondary {
           padding: 4px 8px;
@@ -2230,7 +2280,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     <p style="color: var(--text-muted); font-size: 11px; margin-bottom: 16px; max-width: 240px; line-height: 1.4;">
                       Continuous Static &amp; Runtime Security Auditor for ${workspace ? this.escapeHtml(workspace.name) : "workspace"}.
                     </p>
-                    <button id="btn-start-chat" class="btn-primary" style="max-width: 180px;">
+                    <div id="agent-provisioning-notice" class="provisioning-callout" style="display: none;">
+                      <div style="font-weight: 700; color: #fbbf24; margin-bottom: 4px; display: flex; align-items: center; gap: 6px;">
+                        <span>⚠️ First-Time Dependency Setup</span>
+                        <span id="agent-prov-pct" style="font-family: monospace; margin-left: auto;">0%</span>
+                      </div>
+                      <div id="agent-prov-detail" style="font-size: 10px; color: #fde68a; margin-bottom: 4px;">
+                        Downloading OpenCode AI Agent, Atlas AST Graph, and Security Engines...
+                      </div>
+                      <div style="font-size: 9px; color: var(--text-muted);">
+                        Action buttons are temporarily disabled while dependencies install and will unlock automatically once ready.
+                      </div>
+                    </div>
+                    <button id="btn-start-chat" class="btn-primary" style="max-width: 210px;">
                       Launch Security Agent
                     </button>
                   </div>
@@ -2634,35 +2696,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           });
         });
 
-        // Dynamic update from host when server is initialized
-        window.addEventListener('message', (event) => {
-          const msg = event.data;
-          if (msg && msg.command === 'setServerUrl' && msg.url) {
-            const wrapper = document.getElementById('frame-wrapper');
-            let frame = document.getElementById('opencode-frame');
-            if (frame) {
-              if (frame.src !== msg.url) frame.src = msg.url;
-            } else if (wrapper) {
-              wrapper.innerHTML = '<iframe id="opencode-frame" src="' + msg.url + '" allow="clipboard-read; clipboard-write;"></iframe>';
-            }
-            const statusDot = document.querySelector('.status-dot');
-            if (statusDot) {
-              statusDot.style.background = 'var(--accent-green)';
-              statusDot.style.boxShadow = '0 0 6px rgba(52, 211, 153, 0.6)';
-            }
-          }
-        });
-
         // Chat controls (Terminal, Browser, Reload)
         document.getElementById('btn-start-chat')?.addEventListener('click', () => {
           vscode.postMessage({ command: 'startChat' });
         });
 
         document.getElementById('btn-reload-chat')?.addEventListener('click', () => {
-          const frame = document.getElementById('opencode-frame');
-          if (frame && frame.src) {
-            frame.src = frame.src;
-          }
           vscode.postMessage({ command: 'reloadChat' });
         });
 
@@ -3594,6 +3633,50 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
               const fillEl = document.getElementById('setup-bar-fill');
               const detailEl = document.getElementById('setup-progress-detail');
 
+              const provNotice = document.getElementById('agent-provisioning-notice');
+              const provPct = document.getElementById('agent-prov-pct');
+              const provDetail = document.getElementById('agent-prov-detail');
+              const startChatBtn = document.getElementById('btn-start-chat');
+              const actionBtnIds = [
+                'btn-start-chat',
+                'btn-reload-chat',
+                'btn-stop-chat',
+                'btn-terminal',
+                'btn-browser',
+                'btn-start-vul-scan',
+                'btn-rescan-vul',
+                'btn-index-atlas',
+                'btn-sync',
+                'btn-metrics-sync',
+                'btn-metrics-rebuild'
+              ];
+
+              if (!p.completed) {
+                actionBtnIds.forEach(id => {
+                  const btn = document.getElementById(id);
+                  if (btn) btn.disabled = true;
+                });
+                if (startChatBtn) {
+                  startChatBtn.textContent = '⏳ Installing Dependencies (' + p.percent + '%)...';
+                }
+                if (provNotice) provNotice.style.display = 'block';
+                if (provPct) provPct.textContent = p.percent + '%';
+                if (provDetail) provDetail.textContent = (p.stage ? p.stage + ' — ' : '') + (p.detail || '');
+              } else {
+                actionBtnIds.forEach(id => {
+                  const btn = document.getElementById(id);
+                  if (btn) btn.disabled = false;
+                });
+                if (startChatBtn) {
+                  startChatBtn.textContent = 'Launch Security Agent';
+                }
+                if (provNotice) provNotice.style.display = 'none';
+                // Automatically launch Security Agent once first-time dependency provisioning completes
+                if (!document.getElementById('opencode-frame')) {
+                  vscode.postMessage({ command: 'ensureChatStarted' });
+                }
+              }
+
               if (banner) {
                 banner.style.display = 'flex';
                 if (titleEl) titleEl.textContent = p.stage;
@@ -3681,6 +3764,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 } else {
                   frameWrapper.innerHTML = '<iframe id="opencode-frame" src="' + msg.url + '" allow="clipboard-read; clipboard-write;"></iframe>';
                 }
+              }
+              const statusDot = document.querySelector('.status-dot');
+              if (statusDot) {
+                statusDot.style.background = 'var(--accent-green)';
+                statusDot.style.boxShadow = '0 0 6px rgba(52, 211, 153, 0.6)';
               }
               break;
             }

@@ -4,10 +4,15 @@ out/**
 src/**
 test/**
 dist/test/**
+dist/benchmark/**
+dist/test-bridge.js
 dist/**/*.map
 .opencode/**
 .atlas/**
 .codesentinel/**
+opencode.json
+SECURITY-AUDIT-REPORT.md
+security-audit-report.json
 node_modules/**
 .gitignore
 .dockerignore

@@ -6,6 +6,7 @@ import { CodeSentinelMcpServer } from "./mcp/mcpServer";
 import { SidebarProvider } from "./ui/sidebarProvider";
 import { DependencyManager } from "./services/dependencyManager";
 import { SecurityToolManager } from "./scanner/securityToolManager";
+import { HarnessRegistry, HarnessId } from "./harness/harnessRegistry";
 
 let statusBarItem: vscode.StatusBarItem;
 
@@ -19,15 +20,17 @@ export function activate(context: vscode.ExtensionContext) {
   DependencyManager.getInstance().setStoragePath(storagePath);
 
   // Auto-bootstrap host-native dependencies (OpenCode CLI, Atlas Semantic Engine, & SAST tools)
-  DependencyManager.getInstance().ensureDependencies(context).catch((err) => {
-    console.warn("Dependency auto-check warning:", err?.message);
-  });
+  const depsReadyPromise = DependencyManager.getInstance()
+    .ensureDependencies(context)
+    .catch((err) => {
+      console.warn("Dependency auto-check warning:", err?.message);
+    });
 
   const workspaceManager = WorkspaceManager.getInstance();
   workspaceManager.registerWatchers(context);
 
   const opencodeLauncher = OpenCodeLauncher.getInstance();
-  const mcpServer = new CodeSentinelMcpServer("codesentinel-internal", "0.2.2");
+  const mcpServer = new CodeSentinelMcpServer("codesentinel-internal", "0.2.3");
   mcpServer.setWorkspaceContextResolver(() => workspaceManager.getContext());
 
   // Register Webview View Provider for Activity Bar Sidebar
@@ -71,6 +74,9 @@ export function activate(context: vscode.ExtensionContext) {
         imageName: config.get<string>("dockerImage", "codesentinel/core:latest"),
         extensionPath: context.extensionUri.fsPath,
       });
+      await HarnessRegistry.getInstance().syncDetectedHarnesses(rootPath, mcpScriptPath, {
+        extensionPath: context.extensionUri.fsPath,
+      });
       lastSyncedRoot = rootPath;
     } catch (e: any) {
       console.warn("Auto-syncing OpenCode MCP config skipped:", e?.message);
@@ -79,11 +85,18 @@ export function activate(context: vscode.ExtensionContext) {
 
   const initialRoot = workspaceManager.getActiveWorkspaceRoot();
   if (initialRoot) {
-    autoSyncMcp(initialRoot).then(() => {
+    autoSyncMcp(initialRoot).then(async () => {
+      // Wait for OpenCode & Atlas dependencies to be verified/provisioned before starting server
+      await depsReadyPromise;
       // Automatically launch OpenCode & CodeSentinel MCP service right upon starting extension
-      opencodeLauncher.startWebProcess(initialRoot).catch((err) => {
-        console.warn("OpenCode MCP runtime auto-start notice:", err?.message);
-      });
+      opencodeLauncher
+        .startWebProcess(initialRoot)
+        .then(() => {
+          sidebarProvider.updateWebviewContent();
+        })
+        .catch((err) => {
+          console.warn("OpenCode MCP runtime auto-start notice:", err?.message);
+        });
     });
   }
 
@@ -333,6 +346,52 @@ export function activate(context: vscode.ExtensionContext) {
     }
   );
 
+  // 12. Command: Sync MCP & Security Skills to Any AI Harness (Claude, Cursor, Copilot, Gemini, Windsurf, Roo, Cline, Kilo, Kiro, Zed, Codex, OpenCode)
+  const cmdSyncMultiHarness = vscode.commands.registerCommand(
+    "codesentinel.syncMultiHarnessConfig",
+    async () => {
+      const activeWorkspace = await ensureWorkspaceFolder();
+      if (!activeWorkspace) return;
+
+      const registry = HarnessRegistry.getInstance();
+      const supported = registry.getSupportedHarnesses();
+      const detected = new Set(registry.detectActiveHarnesses(activeWorkspace));
+
+      const items = supported.map((h) => ({
+        label: h.name,
+        description: h.configLocationLabel,
+        detail: h.description,
+        picked: detected.has(h.id),
+        harnessId: h.id,
+      }));
+
+      const selected = await vscode.window.showQuickPick(items, {
+        canPickMany: true,
+        title: "CodeSentinel: Select AI Coding Harnesses to Sync MCP & Security Skills",
+        placeHolder: "Choose one or more AI harnesses (detected harnesses are pre-selected)",
+      });
+
+      if (!selected || selected.length === 0) {
+        return;
+      }
+
+      const mcpScriptPath = path.join(context.extensionUri.fsPath, "dist", "mcp-server.js");
+      const targetIds: HarnessId[] = selected.map((s) => s.harnessId);
+      const results = await registry.syncHarnesses(targetIds, activeWorkspace, mcpScriptPath, {
+        extensionPath: context.extensionUri.fsPath,
+      });
+
+      const okNames = results.filter((r) => r.success).map((r) => r.harnessName);
+      if (okNames.length > 0) {
+        vscode.window.showInformationMessage(
+          `CodeSentinel: Synced MCP server & security skills to ${okNames.join(", ")}.`
+        );
+      }
+      workspaceManager.refreshContext();
+      sidebarProvider.updateWebviewContent();
+    }
+  );
+
   context.subscriptions.push(
     cmdLaunchTerminal,
     cmdLaunchWeb,
@@ -346,7 +405,8 @@ export function activate(context: vscode.ExtensionContext) {
     cmdIndexAtlas,
     cmdInstallDependencies,
     cmdRunCloudSecurityAudit,
-    cmdProvisionSkills
+    cmdProvisionSkills,
+    cmdSyncMultiHarness
   );
 
   // Auto-launch OpenCode if user configured it
@@ -364,6 +424,7 @@ export function activate(context: vscode.ExtensionContext) {
   // Non-blocking background Atlas code graph indexing on extension activation
   setTimeout(async () => {
     try {
+      await depsReadyPromise;
       const activeWorkspace = workspaceManager.getActiveWorkspaceRoot();
       if (activeWorkspace) {
         const { GraphService } = await import("./graph/graphService");

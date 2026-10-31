@@ -4,6 +4,7 @@ import * as fs from "fs";
 import * as os from "os";
 import { OpenCodeLauncher } from "../src/opencode/opencodeLauncher";
 import { DependencyManager } from "../src/services/dependencyManager";
+import { HarnessRegistry } from "../src/harness/harnessRegistry";
 
 export async function testOpenCodeLauncher(): Promise<void> {
   console.log("▶ Running OpenCodeLauncher Tests...");
@@ -93,6 +94,42 @@ export async function testOpenCodeLauncher(): Promise<void> {
     console.log("  ✔ Cloud Security Audit skill auto-provisioning verified in workspace");
     console.log("  ✔ Universal language-agnostic and gitignore exclusion engine passed");
     console.log("  ✔ opencode.json synthesis and non-destructive sync (host & docker) passed");
+
+    // Test 5e: Multi-Harness Registry synthesis across 12 workspace harnesses
+    const registry = HarnessRegistry.getInstance();
+    assert.strictEqual(registry.getSupportedHarnesses().length, 13, "Must support 13 AI coding harnesses");
+    const harnessResults = await registry.syncHarnesses(
+      [
+        "claude-code",
+        "cursor",
+        "vscode-copilot",
+        "gemini-antigravity",
+        "roo-code",
+        "cline",
+        "kilo-code",
+        "kiro",
+        "continue",
+        "zed",
+        "codex",
+      ],
+      tmpDir,
+      fakeMcpScript
+    );
+    assert.ok(harnessResults.every((r) => r.success), "All multi-harness sync operations must succeed");
+    assert.ok(fs.existsSync(path.join(tmpDir, ".mcp.json")), "Claude Code .mcp.json must exist");
+    assert.ok(fs.existsSync(path.join(tmpDir, ".claude", "skills", "cloud-security-audit", "SKILL.md")), "Claude Code skills must be provisioned");
+    assert.ok(fs.existsSync(path.join(tmpDir, ".cursor", "mcp.json")), "Cursor .cursor/mcp.json must exist");
+    assert.ok(fs.existsSync(path.join(tmpDir, ".vscode", "mcp.json")), "VS Code Copilot .vscode/mcp.json must exist");
+    assert.ok(fs.existsSync(path.join(tmpDir, ".gemini", "settings.json")), "Gemini CLI / Antigravity .gemini/settings.json must exist");
+    assert.ok(fs.existsSync(path.join(tmpDir, ".agent", "skills", "cloud-security-audit", "SKILL.md")), "Antigravity .agent/skills must be provisioned");
+    assert.ok(fs.existsSync(path.join(tmpDir, ".roo", "mcp.json")), "Roo Code .roo/mcp.json must exist");
+    assert.ok(fs.existsSync(path.join(tmpDir, ".clinerules", "mcp.json")), "Cline .clinerules/mcp.json must exist");
+    assert.ok(fs.existsSync(path.join(tmpDir, ".kilocode", "mcp.json")), "Kilo Code .kilocode/mcp.json must exist");
+    assert.ok(fs.existsSync(path.join(tmpDir, ".kiro", "settings", "mcp.json")), "Kiro .kiro/settings/mcp.json must exist");
+    assert.ok(fs.existsSync(path.join(tmpDir, ".continue", "mcpServers", "codesentinel.json")), "Continue.dev config must exist");
+    assert.ok(fs.existsSync(path.join(tmpDir, ".zed", "settings.json")), "Zed .zed/settings.json must exist");
+    assert.ok(fs.existsSync(path.join(tmpDir, ".codex", "config.toml")), "OpenAI Codex .codex/config.toml must exist");
+    console.log("  ✔ Universal Multi-Harness Registry (13 AI Harnesses + Skills) verified!");
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

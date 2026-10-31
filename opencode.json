@@ -1,35 +1,34 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "timeout": {
-      "startup": 60000,
-      "catalog": 60000,
-      "execution": 600000
-    },
     "codesentinel": {
       "type": "local",
       "command": [
         "node",
-        "./dist/mcp-server.js"
+        "c:/Users/Soham/.antigravity-ide/extensions/codesentinel.codesentinel-0.2.3/dist/mcp-server.js"
       ],
       "enabled": true,
       "timeout": 600000,
       "environment": {
-        "CODESENTINEL_WORKSPACE": "."
+        "CODESENTINEL_WORKSPACE": "d:\\CODESENTINELVSCODE",
+        "CODESENTINEL_STORAGE_PATH": "c:\\Users\\Soham\\AppData\\Roaming\\Antigravity IDE\\User\\globalStorage\\codesentinel.codesentinel",
+        "CODESENTINEL_EXTENSION_PATH": "c:\\Users\\Soham\\.antigravity-ide\\extensions\\codesentinel.codesentinel-0.2.3"
       }
     },
     "atlas": {
       "type": "local",
       "command": [
         "node",
-        "./dist/atlas-bridge.js",
+        "c:/Users/Soham/.antigravity-ide/extensions/codesentinel.codesentinel-0.2.3/dist/atlas-bridge.js",
         "local",
-        "."
+        "d:/CODESENTINELVSCODE"
       ],
       "enabled": true,
       "timeout": 600000,
       "environment": {
-        "CODESENTINEL_WORKSPACE": "."
+        "CODESENTINEL_WORKSPACE": "d:\\CODESENTINELVSCODE",
+        "CODESENTINEL_STORAGE_PATH": "c:\\Users\\Soham\\AppData\\Roaming\\Antigravity IDE\\User\\globalStorage\\codesentinel.codesentinel",
+        "CODESENTINEL_EXTENSION_PATH": "c:\\Users\\Soham\\.antigravity-ide\\extensions\\codesentinel.codesentinel-0.2.3"
       }
     }
   }

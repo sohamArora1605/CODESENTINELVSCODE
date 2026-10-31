@@ -2,7 +2,7 @@
   "name": "codesentinel",
   "displayName": "CodeSentinel Security Scanner",
   "description": "Multi-language Static Application Security Testing (SAST) & Agentic Security Auditor with MCP & OpenCode integration",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "publisher": "codesentinel",
   "license": "MIT",
   "icon": "resources/icon.png",
@@ -104,6 +104,11 @@
       {
         "command": "codesentinel.provisionSkills",
         "title": "CodeSentinel: Provision Security Audit Skills to OpenCode",
+        "category": "CodeSentinel"
+      },
+      {
+        "command": "codesentinel.syncMultiHarnessConfig",
+        "title": "CodeSentinel: Sync MCP & Security Skills to AI Harnesses (Claude, Cursor, Copilot, Gemini, Windsurf, Roo, Cline, Kilo, Kiro, Zed, Codex, OpenCode)",
         "category": "CodeSentinel"
       }
     ],

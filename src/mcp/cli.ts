@@ -17,7 +17,7 @@ async function main() {
 
   // Use CodeSentinelMcpServer's built-in resolveContext() which automatically
   // resolves CODESENTINEL_WORKSPACE / process.cwd() and detects project languages.
-  const server = new CodeSentinelMcpServer("codesentinel-standalone", "0.2.2");
+  const server = new CodeSentinelMcpServer("codesentinel-standalone", "0.2.3");
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
