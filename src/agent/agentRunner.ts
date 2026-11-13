@@ -18,6 +18,7 @@ export interface AgentRunRequest {
   prompt: string;
   timeoutMs?: number;
   env?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
   /** Human-readable progress lines (tool calls, messages) while the agent works. */
   onActivity?: (line: string) => void;
 }
@@ -412,6 +413,7 @@ export class CliAgentExecutor implements AgentExecutor {
       cwd: req.cwd,
       input: cmd.input,
       env,
+      signal: req.signal,
       timeoutMs: req.timeoutMs ?? minutes * 60000,
       onLine: (line) => {
         if (harness === "claude-code") {

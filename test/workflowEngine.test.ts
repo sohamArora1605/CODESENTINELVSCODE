@@ -250,6 +250,84 @@ export async function testWorkflowEngine(): Promise<void> {
   assert.ok(engine.hasActive([repo]));
   sleeper.kill();
 
+  // ---- Antigravity model & effort harmonization in workflow execution
+  let observedAgentDuringRun: any;
+  engine.setAgentExecutor({
+    async run(req) {
+      const activeWf = engine.getWorkflow("AGY-1", repo);
+      observedAgentDuringRun = activeWf?.currentAgent ? { ...activeWf.currentAgent } : undefined;
+      return { success: true, output: "ok", code: 0, harness: "gemini-antigravity" };
+    },
+  });
+  const agyWf = await engine.start("AGY-1", repo, {
+    baseBranch: "main",
+    harness: "gemini-antigravity",
+    model: "gemini-3.8-flash-high",
+    effort: "medium",
+    ticket: { ...custom, key: "AGY-1", summary: "test agy model harmonization" },
+  });
+  assert.ok(observedAgentDuringRun, "currentAgent was populated during step");
+  assert.strictEqual(observedAgentDuringRun.harness, "gemini-antigravity");
+  assert.strictEqual(observedAgentDuringRun.model, "gemini-3.8-flash", "baked flash suffix was harmonized to base");
+  assert.strictEqual(observedAgentDuringRun.effort, "medium");
+  assert.ok(agyWf.logs.some((l) => l.includes("gemini-antigravity · gemini-3.8-flash · effort medium")));
+
+  // ---- Force quit tests at various stages (running, paused, failed)
+  let agentAborted = false;
+  let slowAgentStartedResolve: () => void;
+  const slowAgentStarted = new Promise<void>((r) => { slowAgentStartedResolve = r; });
+  engine.setAgentExecutor({
+    async run(req) {
+      slowAgentStartedResolve();
+      if (req.signal) {
+        if (req.signal.aborted) agentAborted = true;
+        else req.signal.addEventListener("abort", () => { agentAborted = true; });
+      }
+      // Simulate long-running agent
+      await new Promise((r) => setTimeout(r, 2000));
+      return { success: true, output: "done", code: 0, harness: "claude-code" };
+    },
+  });
+
+  // 1. Force quit while running
+  const runningWf = await engine.start("QUIT-1", repo, {
+    baseBranch: "main",
+    ticket: { ...custom, key: "QUIT-1", summary: "test force quit running" },
+  }, false);
+  await slowAgentStarted;
+  assert.strictEqual(runningWf.status, "running");
+  const quitOk = engine.forceQuit("QUIT-1", repo);
+  assert.ok(quitOk, "forceQuit returned true");
+  assert.strictEqual(runningWf.status, "cancelled", "status immediately cancelled");
+  assert.strictEqual(runningWf.awaiting, undefined, "awaiting cleared");
+  assert.ok(agentAborted, "AbortSignal triggered on running agent executor");
+  const failedStep = runningWf.steps.find((s) => s.error === "Force quit by user.");
+  assert.ok(failedStep, "step marked failed with force quit reason");
+
+  // 2. Force quit on paused workflow
+  const pausedWf = await engine.start("QUIT-2", repo, {
+    baseBranch: "main",
+    pauseMode: "every_stage",
+    ticket: { ...custom, key: "QUIT-2", summary: "test force quit paused" },
+  });
+  assert.strictEqual(pausedWf.status, "paused");
+  assert.strictEqual(pausedWf.awaiting, "stage_approval");
+  assert.ok(engine.forceQuit("QUIT-2", repo));
+  assert.strictEqual(pausedWf.status, "cancelled");
+  assert.strictEqual(pausedWf.awaiting, undefined);
+
+  // 3. Force quit on failed workflow
+  engine.setAgentExecutor({
+    async run() { throw new Error("Agent crash"); },
+  });
+  const failedWf = await engine.start("QUIT-3", repo, {
+    baseBranch: "main",
+    ticket: { ...custom, key: "QUIT-3", summary: "test force quit failed" },
+  });
+  assert.strictEqual(failedWf.status, "failed");
+  assert.ok(engine.forceQuit("QUIT-3", repo));
+  assert.strictEqual(failedWf.status, "cancelled");
+
   setSettingsOverrides({});
   console.log("✔ WorkflowEngine OK");
 }

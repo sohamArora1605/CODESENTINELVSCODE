@@ -261,7 +261,9 @@ export class AtlassianMcp implements AtlassianLike {
 
   async comment(key: string, text: string): Promise<{ ok: boolean; message: string }> {
     return this.withClient(async (c) => {
-      await this.op(c, "addOrEditJiraIssueComment", { cloudId: await this.resolveCloudId(c), issueIdOrKey: key, commentBody: text }, true);
+      const tools = (await c.listTools()).tools.map((t) => t.name);
+      const toolName = tools.includes("addCommentToJiraIssue") ? "addCommentToJiraIssue" : "addOrEditJiraIssueComment";
+      await this.op(c, toolName, { cloudId: await this.resolveCloudId(c), issueIdOrKey: key, commentBody: text }, true);
       return { ok: true, message: `Comment posted to ${key}.` };
     }).catch((e: any) => ({ ok: false, message: e.message }));
   }

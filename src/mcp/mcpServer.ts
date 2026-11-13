@@ -1885,6 +1885,18 @@ export class CodeSentinelMcpServer {
     );
 
     this.registerTool(
+      "codesentinel_workflow_force_quit",
+      "Immediately and unconditionally force quit a ticket workflow at any stage: aborts child processes (agents, tests, commands), sets the active step to failed, and marks the workflow as cancelled.",
+      { type: "object", properties: { ticketKey: { type: "string" }, repoPath: { type: "string" } }, required: ["ticketKey"] },
+      async (args, context) => {
+        const ctx = context || this.resolveContext();
+        const repoPath = args?.repoPath || MultiRepoManager.getInstance().getActiveRepoPath() || ctx.rootPath;
+        const ok = WorkflowEngine.getInstance().forceQuit(args.ticketKey, repoPath);
+        return { content: [{ type: "text", text: ok ? "Workflow force quit immediately." : "No such workflow." }], isError: !ok };
+      }
+    );
+
+    this.registerTool(
       "codesentinel_workflow_skip",
       "Skip the failed stage of a ticket workflow (for example a stuck developer step) and continue with the next stage. Not allowed at the push gate.",
       { type: "object", properties: { ticketKey: { type: "string" }, repoPath: { type: "string" } }, required: ["ticketKey"] },

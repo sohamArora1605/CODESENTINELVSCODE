@@ -14,6 +14,7 @@ export interface RunOptions {
   /** Data written to the child's stdin. */
   input?: string;
   maxBuffer?: number;
+  signal?: AbortSignal;
 }
 
 /**
@@ -34,12 +35,16 @@ export function run(file: string, args: string[], opts: RunOptions = {}): Promis
         maxBuffer: opts.maxBuffer ?? 32 * 1024 * 1024,
         windowsHide: true,
         shell: useShell,
+        signal: opts.signal,
       },
       (err: any, stdout, stderr) => {
         const timedOut = Boolean(err && err.killed && err.signal);
         let code = 0;
         if (err) {
           code = typeof err.code === "number" ? err.code : 1;
+          if (err.name === "AbortError" || opts.signal?.aborted) {
+            code = 130;
+          }
           if (err.code === "ENOENT") {
             stderr = `${stderr}\ncommand not found: ${file}`.trim();
           }
@@ -72,7 +77,19 @@ export function runShell(
       env: opts.env ?? process.env,
       shell: true,
       windowsHide: true,
+      signal: opts.signal,
     });
+    if (opts.signal) {
+      if (opts.signal.aborted) {
+        try { child.kill("SIGKILL"); } catch {}
+      } else {
+        opts.signal.addEventListener("abort", () => {
+          clearTimeout(timer);
+          try { child.kill("SIGTERM"); } catch {}
+          setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 1500).unref();
+        }, { once: true });
+      }
+    }
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill("SIGTERM");
@@ -93,13 +110,15 @@ export function runShell(
     };
     child.stdout.on("data", feed("o"));
     child.stderr.on("data", feed("e"));
-    child.on("error", (e) => {
+    child.on("error", (e: any) => {
       clearTimeout(timer);
-      resolve({ code: 127, stdout, stderr: `${stderr}\n${e.message}`.trim(), timedOut });
+      const isAbort = e.name === "AbortError" || Boolean(opts.signal?.aborted);
+      resolve({ code: isAbort ? 130 : 127, stdout, stderr: `${stderr}\n${e.message}`.trim(), timedOut });
     });
     child.on("close", (code) => {
       clearTimeout(timer);
-      resolve({ code: timedOut ? 124 : code ?? 1, stdout, stderr, timedOut });
+      const isAbort = Boolean(opts.signal?.aborted);
+      resolve({ code: isAbort ? 130 : timedOut ? 124 : code ?? 1, stdout, stderr, timedOut });
     });
   });
 }
@@ -125,7 +144,18 @@ export function runStream(
     let timedOut = false;
     const isWin = process.platform === "win32";
     const useShell = isWin && (file.toLowerCase().endsWith(".cmd") || file.toLowerCase().endsWith(".bat"));
-    const child = spawn(file, args, { cwd: opts.cwd, env: opts.env ?? process.env, windowsHide: true, shell: useShell, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(file, args, { cwd: opts.cwd, env: opts.env ?? process.env, windowsHide: true, shell: useShell, stdio: ["pipe", "pipe", "pipe"], signal: opts.signal });
+    if (opts.signal) {
+      if (opts.signal.aborted) {
+        try { child.kill("SIGKILL"); } catch {}
+      } else {
+        opts.signal.addEventListener("abort", () => {
+          clearTimeout(timer);
+          try { child.kill("SIGTERM"); } catch {}
+          setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 1500).unref();
+        }, { once: true });
+      }
+    }
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill("SIGTERM");
@@ -148,12 +178,14 @@ export function runStream(
     });
     child.on("error", (e: any) => {
       clearTimeout(timer);
-      resolve({ code: e.code === "ENOENT" ? 127 : 1, stdout, stderr: e.code === "ENOENT" ? `command not found: ${file}` : `${stderr}\n${e.message}`.trim(), timedOut });
+      const isAbort = e.name === "AbortError" || Boolean(opts.signal?.aborted);
+      resolve({ code: isAbort ? 130 : e.code === "ENOENT" ? 127 : 1, stdout, stderr: isAbort ? "Process aborted by signal." : e.code === "ENOENT" ? `command not found: ${file}` : `${stderr}\n${e.message}`.trim(), timedOut });
     });
     child.on("close", (code) => {
       clearTimeout(timer);
       if (carry.trim() && opts.onLine) opts.onLine(carry);
-      resolve({ code: timedOut ? 124 : code ?? 1, stdout, stderr, timedOut });
+      const isAbort = Boolean(opts.signal?.aborted);
+      resolve({ code: isAbort ? 130 : timedOut ? 124 : code ?? 1, stdout, stderr, timedOut });
     });
     if (child.stdin) {
       child.stdin.on("error", () => {});

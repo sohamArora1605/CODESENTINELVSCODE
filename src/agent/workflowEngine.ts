@@ -70,6 +70,7 @@ export class WorkflowEngine {
   private workflows: Map<string, TicketWorkflow> = new Map();
   private running: Set<string> = new Set();
   private cancelled: Set<string> = new Set();
+  private abortControllers: Map<string, AbortController> = new Map();
   private runOpts: Map<string, WorkflowStartOptions> = new Map();
   private listeners: Array<(workflow: TicketWorkflow) => void> = [];
   private executor: AgentExecutor = new CliAgentExecutor();
@@ -400,8 +401,13 @@ export class WorkflowEngine {
   public cancel(ticketKey: string, repoPath: string): boolean {
     const wf = this.getWorkflow(ticketKey, repoPath);
     if (!wf) return false;
-    if (this.running.has(wf.id)) this.cancelled.add(wf.id);
-    else if (wf.status === "paused") {
+    this.cancelled.add(wf.id);
+    const controller = this.abortControllers.get(wf.id);
+    if (controller) {
+      try { controller.abort(); } catch {}
+      this.abortControllers.delete(wf.id);
+    }
+    if (wf.status === "paused") {
       wf.status = "cancelled";
       wf.awaiting = undefined;
       this.notify(wf);
@@ -409,9 +415,46 @@ export class WorkflowEngine {
     return true;
   }
 
+  /**
+   * Immediately aborts any running child processes (agents, tests, shell commands),
+   * sets the running step to failed, and marks the workflow as cancelled.
+   * Can be called at ANY stage: running, paused, awaiting approval, or failed.
+   */
+  public forceQuit(ticketKey: string, repoPath: string): boolean {
+    const wf = this.getWorkflow(ticketKey, repoPath);
+    if (!wf) return false;
+
+    this.cancelled.add(wf.id);
+    const controller = this.abortControllers.get(wf.id);
+    if (controller) {
+      try { controller.abort(); } catch {}
+      this.abortControllers.delete(wf.id);
+    }
+
+    for (const s of wf.steps) {
+      if (s.status === "running") {
+        s.status = "failed";
+        s.error = "Force quit by user.";
+        s.completedAt = Date.now();
+      }
+    }
+
+    wf.status = "cancelled";
+    wf.awaiting = undefined;
+    wf.currentAgent = undefined;
+    wf.updatedAt = Date.now();
+    this.running.delete(wf.id);
+
+    this.log(wf, "[Force quit] Workflow immediately stopped by user.");
+    this.notify(wf);
+    return true;
+  }
+
   // ------------------------------------------------------------------ orchestration
   private async execute(wf: TicketWorkflow, ticket: JiraTicket): Promise<TicketWorkflow> {
     this.running.add(wf.id);
+    const controller = new AbortController();
+    this.abortControllers.set(wf.id, controller);
     try {
       const order = STEPS.map((s) => s.id);
       for (const id of order) {
@@ -451,6 +494,7 @@ export class WorkflowEngine {
       for (const s of wf.steps) if (s.status === "running") { s.status = "failed"; s.error = s.error || err.message; }
     } finally {
       this.running.delete(wf.id);
+      this.abortControllers.delete(wf.id);
       this.notify(wf);
     }
     return wf;
@@ -512,6 +556,7 @@ export class WorkflowEngine {
     this.notify(wf);
     const res = await this.executor.run({
       role, harness, model: this.runOpts.get(wf.id)?.model, effort: this.runOpts.get(wf.id)?.effort, cwd: wf.workDir, prompt,
+      signal: this.abortControllers.get(wf.id)?.signal,
       onActivity: (line) => {
         wf.activity!.push(`[${role}] ${line}`);
         if (wf.activity!.length > MAX_ACTIVITY) wf.activity!.splice(0, wf.activity!.length - MAX_ACTIVITY);
@@ -580,7 +625,7 @@ export class WorkflowEngine {
     if (!cmd) return;
     this.log(wf, `Setup: ${cmd}`);
     this.notify(wf);
-    const r = await runShell(cmd, { cwd: wf.workDir, timeoutMs: 10 * 60000 });
+    const r = await runShell(cmd, { cwd: wf.workDir, timeoutMs: 10 * 60000, signal: this.abortControllers.get(wf.id)?.signal });
     if (r.code !== 0) this.fail(wf, "cut_branch", `Setup command failed (exit ${r.code}): ${(r.stderr || r.stdout).slice(-400)}`);
   }
 
@@ -717,7 +762,7 @@ export class WorkflowEngine {
       }
 
       // 3. unit tests
-      const unit = await tests.runUnitTests(wf.workDir, wf.repoPath);
+      const unit = await tests.runUnitTests(wf.workDir, wf.repoPath, this.abortControllers.get(wf.id)?.signal);
       wf.verificationResults = {
         iteration: wf.iteration, totalEvaluated: verdicts.length, defendedCount: defended.length,
         genuineCount: genuine.length, verdicts, unitStatus: unit.status,
@@ -750,9 +795,10 @@ export class WorkflowEngine {
   private async stepSuite(wf: TicketWorkflow, id: "stage_test" | "playwright_test"): Promise<void> {
     this.begin(wf, id);
     const tests = TestRunnerService.getInstance();
+    const signal = this.abortControllers.get(wf.id)?.signal;
     const r = id === "stage_test"
-      ? await tests.runStageApiTests(wf.workDir, wf.ticketKey, wf.repoPath)
-      : await tests.runPlaywrightTests(wf.workDir, wf.repoPath);
+      ? await tests.runStageApiTests(wf.workDir, wf.ticketKey, wf.repoPath, signal)
+      : await tests.runPlaywrightTests(wf.workDir, wf.repoPath, signal);
     wf.testResults = { ...(wf.testResults ?? {}), [id === "stage_test" ? "stageApi" : "playwright"]: r };
     if (r.status === "failed") this.fail(wf, id, `${r.error || "failed"}: ${r.output.slice(-400)}`);
     if (r.status === "skipped") return this.done(wf, id, `Skipped: ${r.output}`, r, "skipped");

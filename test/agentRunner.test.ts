@@ -49,12 +49,24 @@ export async function testAgentRunner(): Promise<void> {
   assert.deepStrictEqual(buildHeadlessCommand("gemini-antigravity", "planner", "P", "gem-x")!.args, ["-p", "P", "--output-format", "stream-json", "--dangerously-skip-permissions", "--model", "gem-x", "--mode", "plan"]);
   assert.deepStrictEqual(buildHeadlessCommand("gemini-antigravity", "planner", "P", "gem-x", "high")!.args, ["-p", "P", "--output-format", "stream-json", "--dangerously-skip-permissions", "--model", "gem-x", "--effort", "high", "--mode", "plan"]);
   assert.ok(buildHeadlessCommand("gemini-antigravity", "developer", "P", "gem-x")!.args.includes("--dangerously-skip-permissions"));
+  assert.ok(buildHeadlessCommand("gemini-antigravity", "planner", "P", "gem-x")!.args.includes("--dangerously-skip-permissions"), "agy planner also includes skip-permissions");
   // agy conflict resolution: baked flash effort suffix normalizes to clean base with --effort
   assert.deepStrictEqual(resolveAgyModelAndEffort("gemini-3.8-flash-high", "medium"), { model: "gemini-3.8-flash", effort: "medium" });
+  assert.deepStrictEqual(resolveAgyModelAndEffort("gemini-3.8-flash-low", "high"), { model: "gemini-3.8-flash", effort: "high" });
+  assert.deepStrictEqual(resolveAgyModelAndEffort("gemini-3.8-flash", "low"), { model: "gemini-3.8-flash", effort: "low" });
+  assert.deepStrictEqual(resolveAgyModelAndEffort("gemini-3.8-flash-high", ""), { model: "gemini-3.8-flash-high", effort: undefined });
+  assert.deepStrictEqual(resolveAgyModelAndEffort("", ""), { model: undefined, effort: undefined });
   // agy: claude models do not support --effort
   assert.deepStrictEqual(resolveAgyModelAndEffort("claude-sonnet-4-6", "medium"), { model: "claude-sonnet-4-6", effort: undefined });
+  assert.deepStrictEqual(resolveAgyModelAndEffort("claude-opus-4-6-thinking", "high"), { model: "claude-opus-4-6-thinking", effort: undefined });
   // agy: baked suffix models avoid conflicting --effort
   assert.deepStrictEqual(resolveAgyModelAndEffort("gpt-oss-120b-medium", "medium"), { model: "gpt-oss-120b-medium", effort: undefined });
+  assert.deepStrictEqual(resolveAgyModelAndEffort("custom-model-low", "high"), { model: "custom-model-low", effort: undefined });
+  // agy: standard models without baked suffix pass through valid effort
+  assert.deepStrictEqual(resolveAgyModelAndEffort("gemini-2.5-pro", "high"), { model: "gemini-2.5-pro", effort: "high" });
+  assert.deepStrictEqual(resolveAgyModelAndEffort("gemini-2.5-pro", "invalid-effort"), { model: "gemini-2.5-pro", effort: undefined });
+  // agy headless command with harmonized claude model drops --effort
+  assert.ok(!buildHeadlessCommand("gemini-antigravity", "developer", "P", "claude-sonnet-4-6", "high")!.args.includes("--effort"));
   const withEffort = buildHeadlessCommand("claude-code", "developer", "p", "sonnet", "high")!.args;
   assert.deepStrictEqual(withEffort.slice(withEffort.indexOf("--model"), withEffort.indexOf("--model") + 4), ["--model", "sonnet", "--effort", "high"]);
   assert.ok(!buildHeadlessCommand("claude-code", "developer", "p", "sonnet")!.args.includes("--effort"), "no --effort when none resolved");
@@ -82,6 +94,19 @@ export async function testAgentRunner(): Promise<void> {
     buildInteractiveCommand("gemini-antigravity", "C:\\p.md", "win32"),
     "agy -i (Get-Content -Raw -LiteralPath 'C:\\p.md')"
   );
+  assert.strictEqual(
+    buildInteractiveCommand("gemini-antigravity", "/tmp/p.md", "darwin", { model: "claude-sonnet-4-6", effort: "high" }),
+    'agy --model claude-sonnet-4-6 -i "$(cat \'/tmp/p.md\')"',
+    "agy interactive drops effort for claude model"
+  );
+  assert.strictEqual(
+    buildInteractiveCommand("cursor", "/tmp/p.md", "darwin", { model: "claude-3-5-sonnet" }),
+    'cursor-agent --model claude-3-5-sonnet "$(cat \'/tmp/p.md\')"'
+  );
+  assert.strictEqual(buildInteractiveCommand("cursor", null, "darwin"), "cursor-agent");
+  assert.strictEqual(buildInteractiveCommand("claude-code", null, "darwin"), "claude");
+  assert.strictEqual(buildInteractiveCommand("opencode", null, "darwin"), "opencode");
+  assert.strictEqual(buildInteractiveCommand("gemini-antigravity", null, "darwin"), "agy");
 
   // ---- stream parsing
   assert.deepStrictEqual(parseClaudeStreamLine('{"type":"system","subtype":"init","model":"claude-sonnet-5-5"}'), { model: "claude-sonnet-5-5", activity: "started (claude-sonnet-5-5)" });

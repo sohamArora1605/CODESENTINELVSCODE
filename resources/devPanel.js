@@ -200,8 +200,13 @@
     var cardsHtml = displayList.map(function (w) {
       var cur = w.steps.filter(function (x) { return x.status === "running"; })[0];
       var isStuck = w.status === "paused" || w.status === "failed" || !!w.awaiting;
-      var h = '<div class="dv-card' + (w.status === "running" ? " dv-live" : "") + '"><div class="dv-card-h"><b>' + esc(w.ticketKey) + "</b>" + pill(w.status, statusKind(w.status)) +
-        (w.awaiting ? pill("awaiting " + w.awaiting.replace(/_/g, " "), "warn") : "") + "<span class=\"dv-muted\">" + esc(w.id.split(":")[0]) + " · " + esc(w.targetBranch) + "</span></div>";
+      var canQuit = w.status !== "completed";
+      var h = '<div class="dv-card' + (w.status === "running" ? " dv-live" : "") + '"><div class="dv-card-h">' +
+        '<b>' + esc(w.ticketKey) + "</b>" +
+        pill(w.status, statusKind(w.status)) +
+        (w.awaiting ? pill("awaiting " + w.awaiting.replace(/_/g, " "), "warn") : "") +
+        (canQuit ? '<button class="dv-btn dv-btn-danger dv-btn-xs dv-force-quit-btn" data-act="forceQuit" data-key="' + esc(w.ticketKey) + '" data-repo="' + esc(w.repoPath) + '" title="Force quit this workflow immediately at any stage">✕ Force quit</button>' : "") +
+        '<span class="dv-muted dv-card-branch">' + esc(w.id.split(":")[0]) + " · " + esc(w.targetBranch) + "</span></div>";
       if (w.ticketSummary) h += '<div class="dv-title">' + esc(w.ticketSummary) + "</div>";
 
       if (isStuck) {
@@ -533,6 +538,7 @@
       case "filterWorkflows": S.filterStuckOnly = (d.val === "stuck"); render(); break;
       case "nextStep": post("nextStep", { ticketKey: d.key, repoPath: d.repo }); break;
       case "cancel": post("cancel", { ticketKey: d.key, repoPath: d.repo }); break;
+      case "forceQuit": post("forceQuit", { ticketKey: d.key, repoPath: d.repo }); break;
       case "skip": post("skip", { ticketKey: d.key, repoPath: d.repo }); break;
       case "discard": post("discard", { ticketKey: d.key, repoPath: d.repo }); break;
       case "terminal": post("openTerminal", { ticketKey: d.key, repoPath: d.repo }); break;

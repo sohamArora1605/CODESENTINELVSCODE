@@ -205,10 +205,11 @@ export class TestRunnerService {
     env: NodeJS.ProcessEnv,
     timeoutMs: number,
     prefixLog = "",
-    secretValues: string[] = []
+    secretValues: string[] = [],
+    signal?: AbortSignal
   ): Promise<TestExecutionResult> {
     const start = Date.now();
-    const r = await runShell(command, { cwd: summary.repoPath, env, timeoutMs });
+    const r = await runShell(command, { cwd: summary.repoPath, env, timeoutMs, signal });
     const output = this.redact(`${prefixLog}${r.stdout}${r.stderr ? `\n${r.stderr}` : ""}`.slice(-200000), secretValues);
     const c = parseTestOutput(output);
     const ok = r.code === 0;
@@ -242,20 +243,20 @@ export class TestRunnerService {
   }
 
   /** `configRepo`: the main repo whose config/secrets apply when `repoPath` is a ticket worktree. */
-  public async runUnitTests(repoPath: string, configRepo = repoPath): Promise<TestExecutionResult> {
+  public async runUnitTests(repoPath: string, configRepo = repoPath, signal?: AbortSignal): Promise<TestExecutionResult> {
     const s = this.getSummary(repoPath);
     s.overallStatus = "running";
     this.notify(s);
     const cmd = this.detectUnitCommand(repoPath, configRepo);
     if (!cmd) return this.skipped(s, "unit", "unit", "No unit test command detected. Set one in the repo's CodeSentinel config (testCommand).");
-    return this.execSuite(s, "unit", "unit", cmd, { ...process.env, CI: "true" }, 10 * 60000);
+    return this.execSuite(s, "unit", "unit", cmd, { ...process.env, CI: "true" }, 10 * 60000, "", [], signal);
   }
 
   /**
    * Stage deploy (manual | auto | disabled) then the API suite with vault secrets injected as env vars
    * (plus STAGE_API_URL). Nothing is faked: without an API test command the suite is reported as skipped.
    */
-  public async runStageApiTests(repoPath: string, ticketKey?: string, configRepo = repoPath): Promise<TestExecutionResult> {
+  public async runStageApiTests(repoPath: string, ticketKey?: string, configRepo = repoPath, signal?: AbortSignal): Promise<TestExecutionResult> {
     const s = this.getSummary(repoPath);
     s.overallStatus = "running";
     this.notify(s);
@@ -280,7 +281,7 @@ export class TestRunnerService {
     let log = "";
     if (mode === "auto") {
       if (!deployCmd) return this.skipped(s, "stageApi", "stage_api", "Stage deploy mode is 'auto' but no stageDeployCommand is configured.");
-      const d = await runShell(deployCmd, { cwd: repoPath, env, timeoutMs: 15 * 60000 });
+      const d = await runShell(deployCmd, { cwd: repoPath, env, timeoutMs: 15 * 60000, signal });
       log += this.redact(`[deploy] ${deployCmd} → exit ${d.code}\n${d.stdout}${d.stderr}\n`, Object.values(secrets));
       if (d.code !== 0) {
         return this.finish(s, "stageApi", {
@@ -293,10 +294,10 @@ export class TestRunnerService {
     } else {
       log += "[deploy] disabled.\n";
     }
-    return this.execSuite(s, "stageApi", "stage_api", cmd, env, 10 * 60000, log, Object.values(secrets));
+    return this.execSuite(s, "stageApi", "stage_api", cmd, env, 10 * 60000, log, Object.values(secrets), signal);
   }
 
-  public async runPlaywrightTests(repoPath: string, configRepo = repoPath): Promise<TestExecutionResult> {
+  public async runPlaywrightTests(repoPath: string, configRepo = repoPath, signal?: AbortSignal): Promise<TestExecutionResult> {
     const s = this.getSummary(repoPath);
     s.overallStatus = "running";
     this.notify(s);
@@ -307,7 +308,7 @@ export class TestRunnerService {
     if (!this.hasPlaywright(repoPath)) {
       return this.skipped(s, "playwright", "playwright", "No playwright.config found. Ask the tester agent to scaffold Playwright tests.");
     }
-    return this.execSuite(s, "playwright", "playwright", this.detectPlaywrightCommand(repoPath, configRepo), { ...process.env, CI: "true" }, 15 * 60000);
+    return this.execSuite(s, "playwright", "playwright", this.detectPlaywrightCommand(repoPath, configRepo), { ...process.env, CI: "true" }, 15 * 60000, "", [], signal);
   }
 
   public async runAllTests(repoPath: string, ticketKey?: string): Promise<RepoTestSummary> {

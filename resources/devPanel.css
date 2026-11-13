@@ -71,8 +71,11 @@
 .dv-chips { display: flex; flex-wrap: wrap; }
 .dv-link { color: var(--accent-blue); font-size: 11px; }
 .dv-feed { max-height: 170px; }
-.dv-btn.dv-danger { border-color: rgba(248,113,113,.5); color: #f87171; background: rgba(248,113,113,.08); }
-.dv-btn.dv-danger:hover { background: rgba(248,113,113,.18); }
+.dv-btn.dv-danger, .dv-btn.dv-btn-danger { border-color: rgba(248,113,113,.5); color: #f87171; background: rgba(248,113,113,.08); }
+.dv-btn.dv-danger:hover, .dv-btn.dv-btn-danger:hover { background: rgba(248,113,113,.22); color: #fff; }
+.dv-btn-xs { padding: 2px 7px; font-size: 10px; line-height: 1.25; border-radius: 4px; }
+.dv-force-quit-btn { margin-left: auto; font-weight: 700; display: inline-flex; align-items: center; gap: 4px; }
+.dv-card-branch { flex-basis: 100%; margin-top: 2px; }
 .dv-stages { margin: 4px 0; } .dv-stages summary { cursor: pointer; color: var(--text-muted); font-size: 11px; margin-bottom: 4px; }
 
 /* Workflows toolbar & notification toggle pills */

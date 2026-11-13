@@ -241,11 +241,16 @@ export class DevPanelController {
       case "dev:startTicket": return this.startTicket(msg);
 
       case "dev:resume":
-      case "dev:cancel": {
+      case "dev:cancel":
+      case "dev:forceQuit": {
         const repo = this.knownRepo(msg.repoPath);
         if (!repo || !TICKET_RE.test(String(msg.ticketKey))) throw new Error("Unknown workflow.");
         const engine = WorkflowEngine.getInstance();
-        if (msg.command === "dev:cancel") engine.cancel(msg.ticketKey, repo);
+        if (msg.command === "dev:forceQuit") {
+          const ok = engine.forceQuit(msg.ticketKey, repo);
+          if (ok) this.toast(`${msg.ticketKey}: Workflow force quit immediately.`, "info");
+          else this.toast(`${msg.ticketKey}: Workflow not found.`, "bad");
+        } else if (msg.command === "dev:cancel") engine.cancel(msg.ticketKey, repo);
         else void engine.resume(msg.ticketKey, repo).catch((e) => this.toast(e.message, "bad"));
         return;
       }
