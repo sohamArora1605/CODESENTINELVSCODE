@@ -341,10 +341,10 @@ export async function testWorkflowEngine(): Promise<void> {
     pauseMode: "every_stage",
     ticket: { ...custom, key: "CHAT-1", summary: "test stage chat" },
   });
-  const resChat = engine.addStageChat("CHAT-1", repo, "develop", "Please check CORS maxAge validation");
-  assert.strictEqual(resChat.wf.stageChats?.develop?.length, 1);
-  assert.strictEqual(resChat.wf.stageChats.develop[0].text, "Please check CORS maxAge validation");
-  assert.strictEqual(resChat.wf.stageGuidance?.develop, "Please check CORS maxAge validation");
+  const resChat = engine.addStageChat("CHAT-1", repo, "plan", "Please check CORS maxAge validation");
+  assert.strictEqual(resChat.wf.stageChats?.plan?.length, 1);
+  assert.strictEqual(resChat.wf.stageChats.plan[0].text, "Please check CORS maxAge validation");
+  assert.strictEqual(resChat.wf.stageGuidance?.plan, "Please check CORS maxAge validation");
   assert.ok(chatWf.activity?.some((a) => a.includes("Please check CORS maxAge validation")));
 
   // Resuming step incorporates guidance into agent prompt

@@ -82,6 +82,39 @@ export async function testTestRunner(): Promise<void> {
   assert.strictEqual(pw.status, "skipped");
   assert.strictEqual(pw.totalTests, 0);
 
+  // ---- AbortSignal cancellation in test execution
+  // 1. Pre-aborted signal fails immediately
+  const abortedCtrl = new AbortController();
+  abortedCtrl.abort();
+  const rAbortPre = await svc.runUnitTests(ok, ok, abortedCtrl.signal);
+  assert.strictEqual(rAbortPre.status, "failed", "pre-aborted unit test must fail");
+
+  // 2. Active signal aborts long-running unit test run promptly
+  const slowRepo = repoWith({ test: `node -e "setTimeout(() => {}, 5000)"` });
+  const activeCtrl = new AbortController();
+  const start = Date.now();
+  const slowP = svc.runUnitTests(slowRepo, slowRepo, activeCtrl.signal);
+  setTimeout(() => activeCtrl.abort(), 100);
+  const rAbortActive = await slowP;
+  const elapsed = Date.now() - start;
+  assert.strictEqual(rAbortActive.status, "failed", "aborted unit test must fail");
+  assert.ok(elapsed < 4000, `Expected abort to terminate process quickly, took ${elapsed}ms`);
+
+  // 3. Pre-aborted signal on stage API tests
+  setRepoConfig(api, { apiTestingEnabled: true });
+  const stageCtrl = new AbortController();
+  stageCtrl.abort();
+  const rStageAbort = await svc.runStageApiTests(api, "T-7", api, stageCtrl.signal);
+  assert.strictEqual(rStageAbort.status, "failed", "aborted stage API test must fail");
+
+  // 4. Pre-aborted signal on Playwright tests
+  const pwRepo = repoWith({ "test:e2e": `node -e "setTimeout(() => {}, 5000)"` });
+  fs.writeFileSync(path.join(pwRepo, "playwright.config.ts"), "export default {};");
+  const pwCtrl = new AbortController();
+  pwCtrl.abort();
+  const rPwAbort = await svc.runPlaywrightTests(pwRepo, pwRepo, pwCtrl.signal);
+  assert.strictEqual(rPwAbort.status, "failed", "aborted playwright test must fail");
+
   // ---- results persist for other processes (MCP / UI)
   const disk = JSON.parse(fs.readFileSync(path.join(bad, ".codesentinel", "test-results.json"), "utf-8"));
   assert.strictEqual(disk.unit.status, "failed");
