@@ -25,7 +25,7 @@ const SETTING_DEFAULTS: Record<string, unknown> = {
   "testing.stageDeployMode": "manual", "testing.stageDeployCommand": "", "testing.stageApiBaseUrl": "",
   "workflow.useWorktrees": true, "workflow.maxFixIterations": 3, "workflow.autoPush": false,
   "workflow.requirePlanApproval": false, "workflow.agentTimeoutMinutes": 30, "workflow.pauseMode": "gates", "workflow.jiraStageComments": true,
-  "agent.model.claude-code": "sonnet", "agent.model.gemini-antigravity": "gemini-3.8-flash-high", "agent.model.opencode": "opencode/big-pickle", "agent.roleModels": {}, "workflow.stages": {},
+  "agent.model.claude-code": "sonnet", "agent.model.gemini-antigravity": "gemini-3.8-flash", "agent.model.opencode": "opencode/big-pickle", "agent.roleModels": {}, "workflow.stages": {},
   "agent.effort.claude-code": "medium", "agent.effort.gemini-antigravity": "medium", "agent.effort.opencode": "medium", "agent.roleEfforts": {}, "workflow.baseBranches": ["main", "develop"],
 };
 
@@ -247,6 +247,20 @@ export class DevPanelController {
         const engine = WorkflowEngine.getInstance();
         if (msg.command === "dev:cancel") engine.cancel(msg.ticketKey, repo);
         else void engine.resume(msg.ticketKey, repo).catch((e) => this.toast(e.message, "bad"));
+        return;
+      }
+
+      case "dev:resumeAll": {
+        const engine = WorkflowEngine.getInstance();
+        const paused = engine.getAllWorkflows().filter((w) => w.status === "paused");
+        if (!paused.length) {
+          this.toast("No paused workflows.", "info");
+          return;
+        }
+        for (const w of paused) {
+          void engine.resume(w.ticketKey, w.repoPath).catch((e) => this.toast(`${w.ticketKey}: ${e.message}`, "bad"));
+        }
+        this.toast(`Resuming ${paused.length} workflow(s)…`, "ok");
         return;
       }
 

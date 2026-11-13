@@ -74,3 +74,33 @@
 .dv-btn.dv-danger { border-color: rgba(248,113,113,.5); color: #f87171; background: rgba(248,113,113,.08); }
 .dv-btn.dv-danger:hover { background: rgba(248,113,113,.18); }
 .dv-stages { margin: 4px 0; } .dv-stages summary { cursor: pointer; color: var(--text-muted); font-size: 11px; margin-bottom: 4px; }
+
+/* Workflows toolbar & notification toggle pills */
+.dv-wf-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; padding: 6px 8px; background: rgba(0,0,0,.2); border-radius: 6px; border: 1px solid var(--card-border); }
+.dv-notif-pills { display: flex; gap: 6px; align-items: center; }
+.dv-pill-btn { padding: 4px 8px; border-radius: 12px; border: 1px solid var(--card-border); background: transparent; color: var(--text-muted); font-size: 11px; font-weight: 600; cursor: pointer; transition: all .15s ease; }
+.dv-pill-btn:hover { background: rgba(255,255,255,.08); color: var(--text-main); }
+.dv-pill-btn.dv-active { background: rgba(56,189,248,.18); color: var(--accent-blue); border-color: rgba(56,189,248,.5); }
+.dv-pill-btn.dv-warn-pill { border-color: rgba(251,191,36,.4); color: #fbbf24; }
+.dv-pill-btn.dv-warn-pill.dv-active { background: rgba(251,191,36,.2); color: #fde047; border-color: #fbbf24; }
+.dv-btn-sm { padding: 3px 8px; font-size: 10px; }
+
+/* Notification callout banner on stuck/paused cards */
+.dv-notif-banner { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; margin: 6px 0; border-radius: 6px; border: 1px solid rgba(251,191,36,.4); border-left-width: 4px; background: rgba(251,191,36,.1); }
+.dv-notif-banner.dv-notif-bad { border-color: rgba(248,113,113,.4); border-left-color: #f87171; background: rgba(248,113,113,.1); }
+.dv-notif-banner.dv-notif-warn { border-left-color: #fbbf24; }
+.dv-notif-title { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-main); }
+.dv-notif-bell { font-size: 13px; }
+.dv-notif-quick-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
+
+/* Terminal Console Box */
+.dv-terminal-box { margin-top: 8px; border: 1px solid rgba(56,189,248,.35); border-radius: 6px; background: #0c1017; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,.3); }
+.dv-terminal-header { display: flex; align-items: center; justify-content: space-between; padding: 5px 8px; background: rgba(22,27,34,.95); border-bottom: 1px solid rgba(56,189,248,.2); font-size: 10.5px; }
+.dv-terminal-dots { display: flex; gap: 4px; align-items: center; }
+.dv-tdot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.dv-tdot.dv-red { background: #f87171; }
+.dv-tdot.dv-yellow { background: #fbbf24; }
+.dv-tdot.dv-green { background: #34d399; }
+.dv-terminal-title { font-family: var(--vscode-editor-font-family, monospace); font-weight: 600; color: #94a3b8; font-size: 10.5px; margin: 0 6px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dv-terminal-ctrls { display: flex; gap: 6px; align-items: center; }
+.dv-terminal-box .dv-pre { margin: 0; border-radius: 0; background: transparent; max-height: 220px; font-size: 10.5px; color: #e2e8f0; line-height: 1.45; }

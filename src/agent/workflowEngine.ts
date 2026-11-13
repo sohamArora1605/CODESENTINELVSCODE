@@ -8,7 +8,7 @@ import { VulnerabilityScanner, ClubbedFinding } from "../scanner/vulnerabilitySc
 import { CegarVerifier } from "../scanner/cegarVerifier";
 import { TestRunnerService } from "../testing/testRunnerService";
 import { runShell } from "../util/proc";
-import { AgentExecutor, AgentRole, CliAgentExecutor, AgentHarnessType, AgentRunResult, resolveModel, resolveEffort } from "./agentRunner";
+import { AgentExecutor, AgentRole, CliAgentExecutor, AgentHarnessType, AgentRunResult, resolveModel, resolveEffort, resolveAgyModelAndEffort } from "./agentRunner";
 import { getRepoConfig, getSetting, ensureSentinelDir } from "../config/settings";
 
 const STEPS: Array<{ id: WorkflowStepId; name: string }> = [
@@ -497,8 +497,13 @@ export class WorkflowEngine {
   /** Runs one agent, streaming its activity into the workflow and recording role/harness/model + output on the stage. */
   private async agent(wf: TicketWorkflow, stepId: WorkflowStepId, role: AgentRole, prompt: string): Promise<AgentRunResult> {
     const harness = (wf.harness as AgentHarnessType | undefined) ?? getSetting<AgentHarnessType>("defaultAgentHarness", "claude-code");
-    const modelAsked = resolveModel(harness, role, this.runOpts.get(wf.id)?.model);
-    const effortAsked = resolveEffort(harness, role, this.runOpts.get(wf.id)?.effort);
+    let modelAsked = resolveModel(harness, role, this.runOpts.get(wf.id)?.model);
+    let effortAsked = resolveEffort(harness, role, this.runOpts.get(wf.id)?.effort);
+    if (harness === "gemini-antigravity") {
+      const agy = resolveAgyModelAndEffort(modelAsked, effortAsked);
+      modelAsked = agy.model;
+      effortAsked = agy.effort;
+    }
     wf.activity = wf.activity ?? [];
     wf.currentAgent = { role, harness, model: modelAsked, effort: effortAsked, startedAt: Date.now() };
     const tag = `${harness}${modelAsked ? " · " + modelAsked : ""}${effortAsked ? " · effort " + effortAsked : ""}`;

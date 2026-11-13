@@ -15,6 +15,7 @@
     startFor: null, // ticket key whose start form is open
     openLogs: {}, openOutput: {}, openCfg: {}, toast: null,
     filter: { status: "All", query: "" },
+    filterStuckOnly: false,
   };
 
   var STAGES = [
@@ -31,7 +32,7 @@
   var EFFORTS = ["low", "medium", "high", "xhigh", "max"];
   var MODEL_PRESETS = {
     "claude-code": ["sonnet", "haiku", "opus"],
-    "gemini-antigravity": ["gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low", "claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium"],
+    "gemini-antigravity": ["gemini-3.8-flash", "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low", "claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium"],
     "opencode": ["opencode/big-pickle", "opencode/glm-5.3-flash-free", "opencode/deepseek-v4.1-flash-free", "opencode/mimo-v2.6-flash-free", "anthropic/claude-3-7-sonnet", "openai/gpt-4o", "google/gemini-2.5-pro"]
   };
   function effortSelect(attrs, cur, blankLabel) {
@@ -65,7 +66,13 @@
   function allWorkflows() {
     var out = [];
     ((S.state && S.state.repos) || []).forEach(function (r) { (r.workflows || []).forEach(function (w) { out.push(w); }); });
-    return out.sort(function (a, b) { return b.updatedAt - a.updatedAt; });
+    // Stable sort by startedAt (newest started first), with stable tie-breaker by id.
+    // StartedAt never changes, so workflow cards NEVER jump or move up and down based on stage, running status, or getting stuck!
+    return out.sort(function (a, b) {
+      var sa = a.startedAt || 0, sb = b.startedAt || 0;
+      if (sa !== sb) return sb - sa;
+      return String(a.id || "").localeCompare(String(b.id || ""));
+    });
   }
 
   // ------------------------------------------------------------------ views
@@ -73,7 +80,7 @@
     var m = S.state && S.state.settings["agent.model." + h];
     if (m) return m;
     if (h === "claude-code") return "sonnet";
-    if (h === "gemini-antigravity") return "gemini-3.8-flash-high";
+    if (h === "gemini-antigravity") return "gemini-3.8-flash";
     if (h === "opencode") return "opencode/big-pickle";
     return "harness default";
   }
@@ -172,27 +179,85 @@
   function viewWorkflows() {
     var list = allWorkflows();
     if (!list.length) return '<div class="dv-empty">No workflows yet. Start a ticket from the Tickets view.<br><span class="dv-muted">Workflows run by the MCP server or CLI appear here too, as long as their repository is listed under Repos &amp; Tests.</span></div>';
-    return list.map(function (w) {
+
+    var stuckOrPaused = list.filter(function (w) {
+      return w.status === "paused" || w.status === "failed" || !!w.awaiting;
+    });
+
+    var topBar = '<div class="dv-wf-toolbar">' +
+      '<div class="dv-notif-pills">' +
+        '<button class="dv-pill-btn' + (!S.filterStuckOnly ? ' dv-active' : '') + '" data-act="filterWorkflows" data-val="all">All Workflows (' + list.length + ')</button>' +
+        (stuckOrPaused.length ? '<button class="dv-pill-btn dv-warn-pill' + (S.filterStuckOnly ? ' dv-active' : '') + '" data-act="filterWorkflows" data-val="stuck">🔔 Needs Attention (' + stuckOrPaused.length + ')</button>' : '') +
+      '</div>' +
+      (stuckOrPaused.length ? '<div class="dv-wf-toolbar-actions">' + btn("▶ Continue all (" + stuckOrPaused.length + ")", "resumeAll", {}, "dv-primary dv-btn-sm") + '</div>' : '') +
+    '</div>';
+
+    var displayList = S.filterStuckOnly ? stuckOrPaused : list;
+    if (S.filterStuckOnly && !displayList.length) {
+      return topBar + '<div class="dv-empty">No workflows currently need attention.<br><a href="#" data-act="filterWorkflows" data-val="all" class="dv-link">View all workflows</a></div>';
+    }
+
+    var cardsHtml = displayList.map(function (w) {
       var cur = w.steps.filter(function (x) { return x.status === "running"; })[0];
+      var isStuck = w.status === "paused" || w.status === "failed" || !!w.awaiting;
       var h = '<div class="dv-card' + (w.status === "running" ? " dv-live" : "") + '"><div class="dv-card-h"><b>' + esc(w.ticketKey) + "</b>" + pill(w.status, statusKind(w.status)) +
         (w.awaiting ? pill("awaiting " + w.awaiting.replace(/_/g, " "), "warn") : "") + "<span class=\"dv-muted\">" + esc(w.id.split(":")[0]) + " · " + esc(w.targetBranch) + "</span></div>";
       if (w.ticketSummary) h += '<div class="dv-title">' + esc(w.ticketSummary) + "</div>";
+
+      if (isStuck) {
+        var notifReason = w.awaiting === "plan_approval" ? "Plan is ready for your review and approval."
+          : w.awaiting === "push_approval" ? "All verification gates passed; ready to commit & push."
+          : w.awaiting === "stage_approval" ? "Stage completed; ready to continue to next stage."
+          : w.status === "failed" ? "Workflow failed on step. Choose an action to continue."
+          : "Workflow is paused.";
+        var resumeLabel = w.awaiting === "plan_approval" ? "Approve plan" : w.awaiting === "push_approval" ? "Approve & push" : w.awaiting === "stage_approval" ? "Continue to next stage" : "Retry from failed step";
+        h += '<div class="dv-notif-banner dv-notif-' + (w.status === "failed" ? "bad" : "warn") + '">' +
+          '<div class="dv-notif-title"><span class="dv-notif-bell">🔔</span> <b>Needs Attention:</b> ' + esc(notifReason) + '</div>' +
+          '<div class="dv-notif-quick-actions">' +
+            btn(resumeLabel, "resume", { key: w.ticketKey, repo: w.repoPath }, "dv-primary dv-btn-sm") +
+            btn("Proceed to next step", "nextStep", { key: w.ticketKey, repo: w.repoPath }, "dv-btn-sm") +
+            (w.status === "failed" || w.awaiting === "stage_approval" ? btn("Skip step", "skip", { key: w.ticketKey, repo: w.repoPath }, "dv-btn-sm") : "") +
+          '</div></div>';
+      }
+
       if (w.status === "running" && cur) {
         h += '<div class="dv-now"><span class="dv-spin"></span><b>' + esc(cur.name) + "</b>" +
           (w.currentAgent ? " " + agentChip(w.currentAgent) + ' <span class="dv-muted">' + elapsed(Date.now() - w.currentAgent.startedAt) + "</span>" : ' <span class="dv-muted">running a check…</span>') + "</div>";
       }
       h += '<ol class="dv-steps">' + w.steps.map(function (st) {
         var key = w.id + "#" + st.id;
+        var hasOut = Boolean(st.output);
+        var autoOpen = st.status === "failed" && S.openLogs[key] !== false;
+        var isOpen = hasOut && (S.openLogs[key] || autoOpen);
         return '<li class="dv-step dv-' + statusKind(st.status) + '"><i>' + (STEP_ICON[st.status] || "○") + "</i><span><b>" + esc(st.name) + "</b>" +
           (st.agents && st.agents.length ? '<span class="dv-chips">' + st.agents.map(agentChip).join("") + "</span>" : "") +
           (st.summary ? "<em>" + esc(st.summary) + "</em>" : "") + (st.error ? '<em class="dv-bad-t">' + esc(st.error) + "</em>" : "") +
-          (st.output ? '<a href="#" class="dv-link" data-act="toggleLog" data-id="' + esc(key) + '">' + (S.openLogs[key] ? "hide agent output" : "agent output") + "</a>" : "") +
-          (S.openLogs[key] && st.output ? '<pre class="dv-pre">' + esc(st.output) + "</pre>" : "") + "</span></li>";
+          (hasOut ? '<a href="#" class="dv-link" data-act="toggleLog" data-id="' + esc(key) + '">' + (isOpen ? "hide step output" : "view step output") + "</a>" : "") +
+          (isOpen && st.output ? '<pre class="dv-pre">' + esc(st.output) + "</pre>" : "") + "</span></li>";
       }).join("") + "</ol>";
       if (w.iteration) h += '<div class="dv-note">Fix iterations used: ' + w.iteration + "</div>";
-      if (w.activity && w.activity.length && (w.status === "running" || S.openLogs[w.id + "#live"])) {
-        h += '<div class="dv-label">Live activity</div><pre class="dv-pre dv-feed" data-feed="' + esc(w.id) + '">' + esc(w.activity.slice(-40).join("\n")) + "</pre>";
+
+      // Live Terminal Console View (visible when running, paused, or failed so developer always sees terminal output)
+      var showActivity = (w.activity && w.activity.length) && (w.status === "running" || isStuck || S.openLogs[w.id + "#live"]);
+      if (showActivity) {
+        var showFull = Boolean(S.openLogs[w.id + "#live_full"]);
+        var isHidden = Boolean(S.openLogs[w.id + "#live_hide"]);
+        var actLines = showFull ? w.activity : w.activity.slice(-60);
+        h += '<div class="dv-terminal-box">' +
+          '<div class="dv-terminal-header">' +
+            '<div class="dv-terminal-dots"><span class="dv-tdot dv-red"></span><span class="dv-tdot dv-yellow"></span><span class="dv-tdot dv-green"></span></div>' +
+            '<div class="dv-terminal-title">🖥️ Terminal &amp; Activity · ' + esc(w.harness || "agent") + ' (' + w.activity.length + ' events)</div>' +
+            '<div class="dv-terminal-ctrls">' +
+              '<button class="dv-link" data-act="toggleLog" data-id="' + esc(w.id + "#live_full") + '">' + (showFull ? "show tail (60)" : "show all (" + w.activity.length + ")") + '</button>' +
+              (w.status !== "running" ? '<button class="dv-link" data-act="toggleLog" data-id="' + esc(w.id + "#live_hide") + '">' + (isHidden ? "show terminal" : "hide terminal") + '</button>' : '') +
+            '</div>' +
+          '</div>';
+        if (!isHidden) {
+          h += '<pre class="dv-pre dv-feed" data-feed="' + esc(w.id) + '">' + esc(actLines.join("\n")) + '</pre>';
+        }
+        h += '</div>';
       }
+
       h += '<div class="dv-actions">';
       if (w.status === "paused" || w.status === "failed") {
         var label = w.awaiting === "plan_approval" ? "Approve plan" : w.awaiting === "push_approval" ? "Approve & push" : w.awaiting === "stage_approval" ? "Continue to next stage" : "Retry from failed step";
@@ -203,13 +268,15 @@
       if (w.status === "running" || w.status === "paused") h += btn("Cancel", "cancel", { key: w.ticketKey, repo: w.repoPath });
       h += btn("Open agent terminal", "terminal", { key: w.ticketKey, repo: w.repoPath }) +
         btn(S.openLogs[w.id] ? "Hide log" : "Log", "toggleLog", { id: w.id }) +
-        (w.activity && w.activity.length && w.status !== "running" ? btn(S.openLogs[w.id + "#live"] ? "Hide activity" : "Activity", "toggleLog", { id: w.id + "#live" }) : "") +
+        (w.activity && w.activity.length && !showActivity ? btn(S.openLogs[w.id + "#live"] ? "Hide terminal" : "Terminal output", "toggleLog", { id: w.id + "#live" }) : "") +
         (w.plan ? btn(S.openLogs[w.id + "#plan"] ? "Hide plan" : "Plan", "toggleLog", { id: w.id + "#plan" }) : "") +
         btn("Discard & delete branch", "discard", { key: w.ticketKey, repo: w.repoPath }, "dv-danger") + "</div>";
       if (S.openLogs[w.id]) h += "<pre class=\"dv-pre\">" + esc(w.logs.join("\n")) + "</pre>";
       if (S.openLogs[w.id + "#plan"]) h += "<pre class=\"dv-pre\">" + esc(w.plan || "") + "</pre>";
       return h + "</div>";
     }).join("");
+
+    return topBar + cardsHtml;
   }
 
   function suiteCell(label, r, repo, suite) {
@@ -307,7 +374,8 @@
     var knownClaude = CLAUDE_PRESETS.some(function (o) { return o[0] === cm; });
 
     var AGY_PRESETS = [
-      ["gemini-3.8-flash-high", "Gemini 3.8 Flash High (default)"],
+      ["gemini-3.8-flash", "Gemini 3.8 Flash (Default)"],
+      ["gemini-3.8-flash-high", "Gemini 3.8 Flash High"],
       ["gemini-3.8-flash-medium", "Gemini 3.8 Flash Medium"],
       ["gemini-3.8-flash-low", "Gemini 3.8 Flash Low"],
       ["claude-sonnet-4-6", "Claude Sonnet 4.6 Thinking"],
@@ -461,6 +529,8 @@
         var isCustom = S.custom && S.custom.key === d.key;
         post("startTicket", Object.assign({ ticketKey: d.key }, fd, isCustom ? { custom: { summary: S.custom.summary, description: S.custom.description } } : {})); S.startFor = null; S.sub = fd.mode === "auto" ? "workflows" : S.sub; render(); break;
       case "resume": post("resume", { ticketKey: d.key, repoPath: d.repo }); break;
+      case "resumeAll": post("resumeAll", {}); break;
+      case "filterWorkflows": S.filterStuckOnly = (d.val === "stuck"); render(); break;
       case "nextStep": post("nextStep", { ticketKey: d.key, repoPath: d.repo }); break;
       case "cancel": post("cancel", { ticketKey: d.key, repoPath: d.repo }); break;
       case "skip": post("skip", { ticketKey: d.key, repoPath: d.repo }); break;

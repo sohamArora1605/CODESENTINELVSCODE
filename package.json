@@ -384,8 +384,8 @@
         },
         "codesentinel.agent.model.gemini-antigravity": {
           "type": "string",
-          "default": "gemini-3.8-flash-high",
-          "description": "Model passed to `agy --model`. Default is gemini-3.8-flash-high."
+          "default": "gemini-3.8-flash",
+          "description": "Model passed to `agy --model`. Default is gemini-3.8-flash."
         },
         "codesentinel.agent.model.opencode": {
           "type": "string",

@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as crypto from "crypto";
 import { shQuote } from "../util/proc";
-import { AgentHarnessType, resolveModel, resolveEffort, getAugmentedEnv } from "./agentRunner";
+import { AgentHarnessType, resolveModel, resolveEffort, getAugmentedEnv, resolveAgyModelAndEffort } from "./agentRunner";
 import { getSetting } from "../config/settings";
 
 export { AgentHarnessType };
@@ -24,18 +24,39 @@ export function buildInteractiveCommand(
   opts?: { model?: string; effort?: string }
 ): string {
   const win = platform === "win32";
-  const arg = promptFile ? (win ? ` (Get-Content -Raw -LiteralPath '${promptFile.replace(/'/g, "''")}')` : ` "$(cat ${shQuote(promptFile)})"`) : "";
-  const m = opts?.model ? `--model ${opts.model} ` : "";
-  const e = opts?.effort ? (harness === "opencode" ? `--variant ${opts.effort} ` : `--effort ${opts.effort} `) : "";
+  const arg = promptFile ? (win ? `(Get-Content -Raw -LiteralPath '${promptFile.replace(/'/g, "''")}')` : `"$(cat ${shQuote(promptFile)})"`) : "";
+  const parts: string[] = [];
+
   switch (harness) {
-    case "claude-code": return `claude ${m}${e}${arg}`.trim();
-    case "gemini-antigravity":
-      return promptFile
-        ? (win ? `agy ${m}${e}-i (Get-Content -Raw -LiteralPath '${promptFile.replace(/'/g, "''")}')` : `agy ${m}${e}-i "$(cat ${shQuote(promptFile)})"`.trim())
-        : `agy ${m}${e}`.trim();
-    case "cursor": return `cursor-agent ${m}${arg}`.trim();
+    case "claude-code": {
+      parts.push("claude");
+      if (opts?.model) parts.push("--model", opts.model);
+      if (opts?.effort) parts.push("--effort", opts.effort);
+      if (arg) parts.push(arg);
+      return parts.join(" ");
+    }
+    case "gemini-antigravity": {
+      parts.push("agy");
+      const agy = resolveAgyModelAndEffort(opts?.model, opts?.effort);
+      if (agy.model) parts.push("--model", agy.model);
+      if (agy.effort) parts.push("--effort", agy.effort);
+      if (arg) parts.push("-i", arg);
+      return parts.join(" ");
+    }
+    case "cursor": {
+      parts.push("cursor-agent");
+      if (opts?.model) parts.push("--model", opts.model);
+      if (arg) parts.push(arg);
+      return parts.join(" ");
+    }
     case "opencode":
-    default: return promptFile ? `opencode ${m}${e}--prompt${arg}`.trim() : `opencode ${m}${e}`.trim();
+    default: {
+      parts.push("opencode");
+      if (opts?.model) parts.push("--model", opts.model);
+      if (opts?.effort) parts.push("--variant", opts.effort);
+      if (arg) parts.push(arg);
+      return parts.join(" ");
+    }
   }
 }
 
@@ -95,7 +116,7 @@ export class AgentTerminalLauncher {
     const existing = vscode.window.terminals.find((t: any) => t.name === name);
     if (existing) {
       existing.show();
-      existing.sendText(cmd);
+      // Bring active terminal to front to inspect outputs; do not send startup command again
       return existing;
     }
     const baseEnv: Record<string, string> = {

@@ -1,7 +1,8 @@
 import * as assert from "assert";
 import * as fs from "fs";
 import * as path from "path";
-import { buildHeadlessCommand, resolveModel, isValidModel, parseClaudeStreamLine, parseAgyStreamLine, parseOpencodeStreamLine, CliAgentExecutor, resolveEffort, isValidEffort } from "../src/agent/agentRunner";
+import { buildHeadlessCommand, resolveModel, isValidModel, parseClaudeStreamLine, parseAgyStreamLine, parseOpencodeStreamLine, CliAgentExecutor, resolveEffort, isValidEffort, resolveAgyModelAndEffort } from "../src/agent/agentRunner";
+import { buildInteractiveCommand } from "../src/agent/agentTerminalLauncher";
 import { setSettingsOverrides } from "../src/config/settings";
 import { tmpDir } from "./helpers";
 
@@ -11,7 +12,7 @@ export async function testAgentRunner(): Promise<void> {
 
   // ---- model resolution: never opus unless asked; override > role > harness > default
   assert.strictEqual(resolveModel("claude-code", "developer"), "sonnet", "default must be sonnet, not opus");
-  assert.strictEqual(resolveModel("gemini-antigravity", "developer"), "gemini-3.8-flash-high", "agy: default to gemini-3.8-flash-high");
+  assert.strictEqual(resolveModel("gemini-antigravity", "developer"), "gemini-3.8-flash", "agy: default to gemini-3.8-flash");
   assert.strictEqual(resolveModel("opencode", "developer"), "opencode/big-pickle", "opencode: default to big-pickle");
   setSettingsOverrides({ "agent.model.claude-code": "haiku", "agent.roleModels": { planner: "opus" }, "agent.model.opencode": "anthropic/claude-sonnet-5-5" });
   assert.strictEqual(resolveModel("claude-code", "developer"), "haiku");
@@ -45,9 +46,15 @@ export async function testAgentRunner(): Promise<void> {
   assert.ok(!buildHeadlessCommand("claude-code", "planner", "p", "sonnet")!.args.includes("Edit"), "planner is read-only");
   assert.ok(buildHeadlessCommand("claude-code", "ticket", "p")!.args.includes("ToolSearch"));
   assert.ok(!buildHeadlessCommand("claude-code", "developer", "p")!.args.includes("--model"), "no --model flag when none resolved");
-  assert.deepStrictEqual(buildHeadlessCommand("gemini-antigravity", "planner", "P", "gem-x")!.args, ["-p", "P", "--output-format", "stream-json", "--model", "gem-x", "--mode", "plan"]);
-  assert.deepStrictEqual(buildHeadlessCommand("gemini-antigravity", "planner", "P", "gem-x", "high")!.args, ["-p", "P", "--output-format", "stream-json", "--model", "gem-x", "--effort", "high", "--mode", "plan"]);
+  assert.deepStrictEqual(buildHeadlessCommand("gemini-antigravity", "planner", "P", "gem-x")!.args, ["-p", "P", "--output-format", "stream-json", "--dangerously-skip-permissions", "--model", "gem-x", "--mode", "plan"]);
+  assert.deepStrictEqual(buildHeadlessCommand("gemini-antigravity", "planner", "P", "gem-x", "high")!.args, ["-p", "P", "--output-format", "stream-json", "--dangerously-skip-permissions", "--model", "gem-x", "--effort", "high", "--mode", "plan"]);
   assert.ok(buildHeadlessCommand("gemini-antigravity", "developer", "P", "gem-x")!.args.includes("--dangerously-skip-permissions"));
+  // agy conflict resolution: baked flash effort suffix normalizes to clean base with --effort
+  assert.deepStrictEqual(resolveAgyModelAndEffort("gemini-3.8-flash-high", "medium"), { model: "gemini-3.8-flash", effort: "medium" });
+  // agy: claude models do not support --effort
+  assert.deepStrictEqual(resolveAgyModelAndEffort("claude-sonnet-4-6", "medium"), { model: "claude-sonnet-4-6", effort: undefined });
+  // agy: baked suffix models avoid conflicting --effort
+  assert.deepStrictEqual(resolveAgyModelAndEffort("gpt-oss-120b-medium", "medium"), { model: "gpt-oss-120b-medium", effort: undefined });
   const withEffort = buildHeadlessCommand("claude-code", "developer", "p", "sonnet", "high")!.args;
   assert.deepStrictEqual(withEffort.slice(withEffort.indexOf("--model"), withEffort.indexOf("--model") + 4), ["--model", "sonnet", "--effort", "high"]);
   assert.ok(!buildHeadlessCommand("claude-code", "developer", "p", "sonnet")!.args.includes("--effort"), "no --effort when none resolved");
@@ -57,6 +64,24 @@ export async function testAgentRunner(): Promise<void> {
   assert.deepStrictEqual(buildHeadlessCommand("opencode", "developer", "P", "anthropic/x")!.args, ["run", "--model", "anthropic/x", "--auto", "--format", "json", "P"]);
   assert.strictEqual(buildHeadlessCommand("cursor", "developer", "P"), null);
   assert.ok(!buildHeadlessCommand("claude-code", "developer", "p", "bad model")!.args.includes("--model"), "invalid model never reaches the CLI");
+
+  // ---- interactive terminal command building
+  assert.strictEqual(
+    buildInteractiveCommand("claude-code", "/tmp/p.md", "darwin", { model: "sonnet", effort: "high" }),
+    'claude --model sonnet --effort high "$(cat \'/tmp/p.md\')"'
+  );
+  assert.strictEqual(
+    buildInteractiveCommand("gemini-antigravity", "/tmp/p.md", "darwin", { model: "gemini-3.8-flash-high", effort: "medium" }),
+    'agy --model gemini-3.8-flash --effort medium -i "$(cat \'/tmp/p.md\')"'
+  );
+  assert.strictEqual(
+    buildInteractiveCommand("opencode", "/tmp/p.md", "darwin", { model: "opencode/big-pickle", effort: "medium" }),
+    'opencode --model opencode/big-pickle --variant medium "$(cat \'/tmp/p.md\')"'
+  );
+  assert.strictEqual(
+    buildInteractiveCommand("gemini-antigravity", "C:\\p.md", "win32"),
+    "agy -i (Get-Content -Raw -LiteralPath 'C:\\p.md')"
+  );
 
   // ---- stream parsing
   assert.deepStrictEqual(parseClaudeStreamLine('{"type":"system","subtype":"init","model":"claude-sonnet-5-5"}'), { model: "claude-sonnet-5-5", activity: "started (claude-sonnet-5-5)" });

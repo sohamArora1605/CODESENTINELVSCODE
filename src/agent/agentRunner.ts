@@ -48,7 +48,7 @@ const DENY = [
 /** Defaults are deliberately NOT the most expensive model. */
 export const DEFAULT_MODELS: Record<string, string> = {
   "claude-code": "sonnet",
-  "gemini-antigravity": "gemini-3.8-flash-high",
+  "gemini-antigravity": "gemini-3.8-flash",
   opencode: "opencode/big-pickle",
   cursor: "",
 };
@@ -182,6 +182,46 @@ export function resolveModel(harness: AgentHarnessType, role: AgentRole, overrid
   return undefined;
 }
 
+/**
+ * Resolves model and effort flags for Antigravity (agy).
+ * agy throws CLI errors when:
+ * 1) Non-Gemini models (claude-sonnet-4-6, claude-opus-4-6-thinking) receive --effort.
+ * 2) Models with hardcoded effort suffixes (gemini-3.8-flash-high, gpt-oss-120b-medium) conflict with a different --effort value.
+ *
+ * This normalizes gemini-3.8-flash(-...) to base model "gemini-3.8-flash" when effort is passed,
+ * drops --effort for models that do not support it, and avoids passing redundant conflicting flags.
+ */
+export function resolveAgyModelAndEffort(
+  model?: string,
+  effort?: string
+): { model?: string; effort?: string } {
+  const m = (model || "").trim();
+  const e = (effort || "").trim().toLowerCase();
+
+  // Claude models hosted in agy reject the --effort flag completely
+  if (m.startsWith("claude-")) {
+    return { model: m, effort: undefined };
+  }
+
+  // Gemini Flash: strip baked suffix if effort is provided or keep clean base name
+  if (/^gemini-3\.8-flash(-low|-medium|-high|-xhigh|-max)?$/i.test(m)) {
+    if (e && isValidEffort(e)) {
+      return { model: "gemini-3.8-flash", effort: e };
+    }
+    // If no explicit effort, keep m (e.g. "gemini-3.8-flash" or "gemini-3.8-flash-high") with no --effort flag
+    return { model: m || "gemini-3.8-flash", effort: undefined };
+  }
+
+  // Models with baked effort suffix like gpt-oss-120b-medium
+  const suffixMatch = m.match(/-(low|medium|high|xhigh|max)$/i);
+  if (suffixMatch) {
+    // Model already specifies effort in its alias; do not pass --effort to prevent conflicts
+    return { model: m, effort: undefined };
+  }
+
+  return { model: m || undefined, effort: e && isValidEffort(e) ? e : undefined };
+}
+
 export function buildHeadlessCommand(
   harness: AgentHarnessType,
   role: AgentRole,
@@ -213,18 +253,20 @@ export function buildHeadlessCommand(
         input: prompt, // via stdin: no quoting, no argv length limits
       };
 
-    case "gemini-antigravity":
+    case "gemini-antigravity": {
+      const agy = resolveAgyModelAndEffort(m, e);
       return {
         file: executable,
         args: [
           "-p", prompt,
           "--output-format", "stream-json",
-          ...(m ? ["--model", m] : []),
-          ...(e ? ["--effort", e] : []),
+          "--dangerously-skip-permissions",
+          ...(agy.model ? ["--model", agy.model] : []),
+          ...(agy.effort ? ["--effort", agy.effort] : []),
           "--mode", readOnly ? "plan" : "accept-edits",
-          ...(readOnly ? [] : ["--dangerously-skip-permissions"]),
         ],
       };
+    }
 
     case "opencode":
       return {
