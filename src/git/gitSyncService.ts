@@ -299,6 +299,12 @@ export class GitSyncService {
     const wt = this.getWorktreePath(repoPath, key);
     if (fs.existsSync(path.join(wt, ".git"))) return { success: true, path: wt, message: "Reusing worktree." };
     if (!(await this.isValidBranchName(branch))) return { success: false, path: wt, message: `Invalid branch name '${branch}'.` };
+    if (fs.existsSync(wt)) {
+      try {
+        fs.rmSync(wt, { recursive: true, force: true });
+        await this.git(repoPath, ["worktree", "prune"]);
+      } catch {}
+    }
     ensureSentinelDir(repoPath);
     fs.mkdirSync(path.dirname(wt), { recursive: true });
     let r;
