@@ -1901,6 +1901,22 @@ export class CodeSentinelMcpServer {
     );
 
     this.registerTool(
+      "codesentinel_workflow_next_step",
+      "Advance a stopped, paused, or failed ticket workflow to the next step. If a step failed (e.g. developer agent finished without changing files), marks it completed and moves to the next stage.",
+      { type: "object", properties: { ticketKey: { type: "string" }, repoPath: { type: "string" } }, required: ["ticketKey"] },
+      async (args, context) => {
+        const ctx = context || this.resolveContext();
+        const repoPath = args?.repoPath || MultiRepoManager.getInstance().getActiveRepoPath() || ctx.rootPath;
+        try {
+          void WorkflowEngine.getInstance().nextStep(args.ticketKey, repoPath).catch(() => {});
+          return { content: [{ type: "text", text: "Advancing to the next step. Poll codesentinel_workflow_status." }] };
+        } catch (e: any) {
+          return { content: [{ type: "text", text: e.message }], isError: true };
+        }
+      }
+    );
+
+    this.registerTool(
       "codesentinel_workflow_discard",
       "Undo a ticket workflow: stop it, remove its worktree, delete the LOCAL feature branch and the workflow record. Destructive: requires confirm=true. Never deletes remote branches, protected branches, or uncommitted work in the main checkout.",
       { type: "object", properties: { ticketKey: { type: "string" }, repoPath: { type: "string" }, confirm: { type: "boolean", description: "Must be true" } }, required: ["ticketKey", "confirm"] },

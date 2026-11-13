@@ -26,7 +26,10 @@ export function buildInteractiveCommand(
   const arg = promptFile ? (win ? ` (Get-Content -Raw -LiteralPath '${promptFile.replace(/'/g, "''")}')` : ` "$(cat ${shQuote(promptFile)})"`) : "";
   switch (harness) {
     case "claude-code": return `claude${arg}`;
-    case "gemini-antigravity": return `agy${arg}`;
+    case "gemini-antigravity":
+      return promptFile
+        ? (win ? `agy -i (Get-Content -Raw -LiteralPath '${promptFile.replace(/'/g, "''")}')` : `agy -i "$(cat ${shQuote(promptFile)})"`)
+        : "agy";
     case "cursor": return `cursor-agent${arg}`;
     case "opencode":
     default: return promptFile ? `opencode --prompt${arg}` : "opencode";
@@ -98,6 +101,17 @@ export class AgentTerminalLauncher {
       const e = DependencyManager.getInstance().getEnvWithBinPath();
       if (e.PATH) env.PATH = e.PATH;
     } catch {}
+    const extraDirs = [
+      path.join(os.homedir(), ".local", "bin"),
+      path.join(os.homedir(), ".codesentinel", "bin"),
+      "/opt/homebrew/bin",
+      "/opt/homebrew/sbin",
+      "/usr/local/bin",
+    ];
+    const pathKey = process.platform === "win32" ? "Path" : "PATH";
+    const currentPath = env[pathKey] || process.env[pathKey] || process.env.PATH || "";
+    env[pathKey] = extraDirs.filter((p) => fs.existsSync(p)).concat(currentPath ? [currentPath] : []).join(path.delimiter);
+    env.PATH = env[pathKey];
     const terminal = vscode.window.createTerminal({ name, cwd: workspaceRoot, env });
     terminal.show();
     terminal.sendText(cmd);

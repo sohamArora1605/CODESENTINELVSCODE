@@ -257,6 +257,13 @@ export class DevPanelController {
         return;
       }
 
+      case "dev:nextStep": {
+        const repo = this.knownRepo(msg.repoPath);
+        if (!repo || !TICKET_RE.test(String(msg.ticketKey))) throw new Error("Unknown workflow.");
+        void WorkflowEngine.getInstance().nextStep(msg.ticketKey, repo).catch((e) => this.toast(e.message, "bad"));
+        return;
+      }
+
       case "dev:discard": {
         const repo = this.knownRepo(msg.repoPath);
         if (!repo || !TICKET_RE.test(String(msg.ticketKey))) throw new Error("Unknown workflow.");

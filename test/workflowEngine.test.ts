@@ -95,6 +95,7 @@ export async function testWorkflowEngine(): Promise<void> {
   const w3 = await engine.start("FE-405", repo, { baseBranch: "main" });
   assert.strictEqual(w3.status, "failed");
   assert.match(w3.steps.find((s) => s.id === "develop")!.error || "", /without changing any files/);
+  await engine.discard("FE-405", repo);
 
   // ---- fix loop gives up after max iterations and does not push
   engine.setAgentExecutor(scriptedAgent({ fixWorks: false }));
@@ -173,7 +174,23 @@ export async function testWorkflowEngine(): Promise<void> {
   assert.match(skipped.steps.find((x) => x.id === "develop")!.summary || "", /Skipped by developer/);
   assert.strictEqual(skipped.awaiting, "push_approval", "continued through the remaining stages to the push gate");
   await assert.rejects(engine.skip("SK-1", repo), /Nothing to skip/, "skipping must never approve a push");
-  await assert.rejects(engine.skip("FE-405", repo), /no workflow|There is no failed/i);
+  await assert.rejects(engine.skip("TASK-42", repo), /There is no failed/i);
+  await assert.rejects(engine.skip("NO-SUCH-1", repo), /no workflow/i);
+
+  // ---- nextStep: advance to the next step when a stage failed or was stopped
+  const stuck2 = await engine.start("NX-1", repo, { baseBranch: "main", targetBranch: "feature/NX-1-next", ticket: { ...custom, key: "NX-1" } });
+  assert.strictEqual(stuck2.status, "failed");
+  const advanced = await engine.nextStep("NX-1", repo);
+  assert.strictEqual(advanced.steps.find((x) => x.id === "develop")!.status, "completed");
+  assert.match(advanced.steps.find((x) => x.id === "develop")!.summary || "", /Continued by/);
+  assert.strictEqual(advanced.awaiting, "push_approval");
+  await engine.discard("NX-1", repo);
+
+  // ---- stages: pull_ticket and cut_branch can also be switched off
+  const noCut = await engine.start("ST-3", repo, { baseBranch: "main", targetBranch: "feature/ST-3-nocut", stages: { pull_ticket: false, cut_branch: false }, ticket: { ...custom, key: "ST-3" } });
+  assert.strictEqual(noCut.steps.find((x) => x.id === "pull_ticket")!.status, "skipped");
+  assert.strictEqual(noCut.steps.find((x) => x.id === "cut_branch")!.status, "skipped");
+  await engine.discard("ST-3", repo);
 
   // ---- discard: worktree, local branch and record are gone; remote and Jira untouched
   const keep = git(repo, "rev-parse", "--abbrev-ref", "HEAD").trim();

@@ -17,7 +17,17 @@
     filter: { status: "All", query: "" },
   };
 
-  var STAGES = [["plan", "Planner agent"], ["develop", "Developer agent"], ["diff_scan", "Security scan of changed files"], ["verify_test", "Tester agent, unit tests and fix loop"], ["stage_test", "Stage & API tests"], ["playwright_test", "Playwright E2E tests"], ["push_branch", "Commit & push"]];
+  var STAGES = [
+    ["pull_ticket", "Pull Jira ticket"],
+    ["cut_branch", "Cut feature branch"],
+    ["plan", "Planner agent"],
+    ["develop", "Developer agent"],
+    ["diff_scan", "Security scan of changed files"],
+    ["verify_test", "Tester agent, unit tests & fix loop"],
+    ["stage_test", "Stage & API tests"],
+    ["playwright_test", "Playwright E2E tests"],
+    ["push_branch", "Commit & push"]
+  ];
   var EFFORTS = ["low", "medium", "high", "xhigh", "max"];
   function effortSelect(attrs, cur, blankLabel) {
     return '<select ' + attrs + '><option value=""' + (!cur ? " selected" : "") + ">" + blankLabel + "</option>" + EFFORTS.map(function (e) {
@@ -175,6 +185,7 @@
       if (w.status === "paused" || w.status === "failed") {
         var label = w.awaiting === "plan_approval" ? "Approve plan" : w.awaiting === "push_approval" ? "Approve & push" : w.awaiting === "stage_approval" ? "Continue to next stage" : "Retry from failed step";
         h += btn(label, "resume", { key: w.ticketKey, repo: w.repoPath }, "dv-primary");
+        h += btn("Proceed to next step", "nextStep", { key: w.ticketKey, repo: w.repoPath });
       }
       if (w.status === "failed" || w.awaiting === "stage_approval") h += btn("Skip this step", "skip", { key: w.ticketKey, repo: w.repoPath });
       if (w.status === "running" || w.status === "paused") h += btn("Cancel", "cancel", { key: w.ticketKey, repo: w.repoPath });
@@ -402,6 +413,7 @@
         var isCustom = S.custom && S.custom.key === d.key;
         post("startTicket", Object.assign({ ticketKey: d.key }, fd, isCustom ? { custom: { summary: S.custom.summary, description: S.custom.description } } : {})); S.startFor = null; S.sub = fd.mode === "auto" ? "workflows" : S.sub; render(); break;
       case "resume": post("resume", { ticketKey: d.key, repoPath: d.repo }); break;
+      case "nextStep": post("nextStep", { ticketKey: d.key, repoPath: d.repo }); break;
       case "cancel": post("cancel", { ticketKey: d.key, repoPath: d.repo }); break;
       case "skip": post("skip", { ticketKey: d.key, repoPath: d.repo }); break;
       case "discard": post("discard", { ticketKey: d.key, repoPath: d.repo }); break;

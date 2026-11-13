@@ -2,7 +2,7 @@
   "name": "codesentinel",
   "displayName": "CodeSentinel Security Scanner",
   "description": "Multi-language Static Application Security Testing (SAST) & Agentic Security Auditor with MCP & OpenCode integration",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "publisher": "codesentinel",
   "license": "MIT",
   "icon": "resources/icon.png",
@@ -457,6 +457,8 @@
         "codesentinel.workflow.stages": {
           "type": "object",
           "default": {
+            "pull_ticket": true,
+            "cut_branch": true,
             "plan": true,
             "develop": true,
             "diff_scan": true,
@@ -468,7 +470,7 @@
           "additionalProperties": {
             "type": "boolean"
           },
-          "description": "Turn individual ticket-workflow stages on or off: plan, develop, diff_scan, verify_test, stage_test, playwright_test, push_branch. A disabled stage is skipped. Missing keys mean enabled."
+          "description": "Turn individual ticket-workflow stages on or off: pull_ticket, cut_branch, plan, develop, diff_scan, verify_test, stage_test, playwright_test, push_branch. A disabled stage is skipped. Missing keys mean enabled."
         }
       }
     }
