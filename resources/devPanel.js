@@ -200,13 +200,18 @@
     var cardsHtml = displayList.map(function (w) {
       var cur = w.steps.filter(function (x) { return x.status === "running"; })[0];
       var isStuck = w.status === "paused" || w.status === "failed" || !!w.awaiting;
-      var canQuit = w.status !== "completed";
       var h = '<div class="dv-card' + (w.status === "running" ? " dv-live" : "") + '"><div class="dv-card-h">' +
-        '<b>' + esc(w.ticketKey) + "</b>" +
-        pill(w.status, statusKind(w.status)) +
-        (w.awaiting ? pill("awaiting " + w.awaiting.replace(/_/g, " "), "warn") : "") +
-        (canQuit ? '<button class="dv-btn dv-btn-danger dv-btn-xs dv-force-quit-btn" data-act="forceQuit" data-key="' + esc(w.ticketKey) + '" data-repo="' + esc(w.repoPath) + '" title="Force quit this workflow immediately at any stage">✕ Force quit</button>' : "") +
-        '<span class="dv-muted dv-card-branch">' + esc(w.id.split(":")[0]) + " · " + esc(w.targetBranch) + "</span></div>";
+        '<div class="dv-card-h-top">' +
+          '<div class="dv-card-h-left">' +
+            '<b>' + esc(w.ticketKey) + "</b>" +
+            pill(w.status, statusKind(w.status)) +
+            (w.awaiting ? pill("awaiting " + w.awaiting.replace(/_/g, " "), "warn") : "") +
+          '</div>' +
+          '<div class="dv-card-h-right">' +
+            '<button class="dv-btn dv-btn-danger dv-btn-xs dv-force-quit-btn" data-act="forceQuit" data-key="' + esc(w.ticketKey) + '" data-repo="' + esc(w.repoPath) + '" title="Force quit this workflow immediately at any stage">✕ Force quit</button>' +
+          '</div>' +
+        '</div>' +
+        '<div class="dv-card-branch dv-muted">' + esc(w.id.split(":")[0]) + " · " + esc(w.targetBranch) + "</div></div>";
       if (w.ticketSummary) h += '<div class="dv-title">' + esc(w.ticketSummary) + "</div>";
 
       if (isStuck) {
@@ -216,12 +221,14 @@
           : w.status === "failed" ? "Workflow failed on step. Choose an action to continue."
           : "Workflow is paused.";
         var resumeLabel = w.awaiting === "plan_approval" ? "Approve plan" : w.awaiting === "push_approval" ? "Approve & push" : w.awaiting === "stage_approval" ? "Continue to next stage" : "Retry from failed step";
+        var stuckStep = w.steps.filter(function (x) { return x.status === "failed"; })[0] || cur || w.steps.filter(function (x) { return x.status === "running"; })[0] || w.steps[0];
         h += '<div class="dv-notif-banner dv-notif-' + (w.status === "failed" ? "bad" : "warn") + '">' +
           '<div class="dv-notif-title"><span class="dv-notif-bell">🔔</span> <b>Needs Attention:</b> ' + esc(notifReason) + '</div>' +
           '<div class="dv-notif-quick-actions">' +
             btn(resumeLabel, "resume", { key: w.ticketKey, repo: w.repoPath }, "dv-primary dv-btn-sm") +
             btn("Proceed to next step", "nextStep", { key: w.ticketKey, repo: w.repoPath }, "dv-btn-sm") +
             (w.status === "failed" || w.awaiting === "stage_approval" ? btn("Skip step", "skip", { key: w.ticketKey, repo: w.repoPath }, "dv-btn-sm") : "") +
+            (stuckStep ? '<button class="dv-btn dv-btn-sm dv-chat-highlight-btn" data-act="toggleLog" data-id="' + esc(w.id + '#chat#' + stuckStep.id) + '">💬 Chat with ' + esc(stuckStep.name) + ' agent</button>' : '') +
           '</div></div>';
       }
 
@@ -231,14 +238,45 @@
       }
       h += '<ol class="dv-steps">' + w.steps.map(function (st) {
         var key = w.id + "#" + st.id;
+        var chatKey = w.id + "#chat#" + st.id;
         var hasOut = Boolean(st.output);
         var autoOpen = st.status === "failed" && S.openLogs[key] !== false;
         var isOpen = hasOut && (S.openLogs[key] || autoOpen);
-        return '<li class="dv-step dv-' + statusKind(st.status) + '"><i>' + (STEP_ICON[st.status] || "○") + "</i><span><b>" + esc(st.name) + "</b>" +
+        var isChatOpen = Boolean(S.openLogs[chatKey]);
+        var chats = (w.stageChats && w.stageChats[st.id]) || [];
+        var chatCount = chats.length;
+
+        var stepHtml = '<li class="dv-step dv-' + statusKind(st.status) + '"><i>' + (STEP_ICON[st.status] || "○") + "</i><span><b>" + esc(st.name) + "</b>" +
           (st.agents && st.agents.length ? '<span class="dv-chips">' + st.agents.map(agentChip).join("") + "</span>" : "") +
           (st.summary ? "<em>" + esc(st.summary) + "</em>" : "") + (st.error ? '<em class="dv-bad-t">' + esc(st.error) + "</em>" : "") +
+          '<span class="dv-actions" style="display:inline-flex;gap:6px;margin-top:2px;">' +
           (hasOut ? '<a href="#" class="dv-link" data-act="toggleLog" data-id="' + esc(key) + '">' + (isOpen ? "hide step output" : "view step output") + "</a>" : "") +
-          (isOpen && st.output ? '<pre class="dv-pre">' + esc(st.output) + "</pre>" : "") + "</span></li>";
+          '<a href="#" class="dv-link dv-stage-chat-toggle" data-act="toggleLog" data-id="' + esc(chatKey) + '">' +
+            (isChatOpen ? "hide stage chat" : "💬 Chat with agent" + (chatCount ? " (" + chatCount + ")" : "")) + '</a>' +
+          '</span>' +
+          (isOpen && st.output ? '<pre class="dv-pre">' + esc(st.output) + "</pre>" : "");
+
+        if (isChatOpen) {
+          stepHtml += '<div class="dv-stage-chat-panel">' +
+            '<div class="dv-stage-chat-header">' +
+              '<span>💬 <b>Chat with ' + esc(st.name) + ' Agent</b> (' + esc(w.harness || 'agent') + ')</span>' +
+              '<button class="dv-link" data-act="openStageTerminal" data-key="' + esc(w.ticketKey) + '" data-repo="' + esc(w.repoPath) + '" data-step="' + esc(st.id) + '">🖥️ Open terminal</button>' +
+            '</div>';
+          if (chats.length) {
+            stepHtml += '<div class="dv-stage-chat-msgs">' + chats.map(function (c) {
+              return '<div class="dv-chat-msg dv-chat-' + esc(c.sender) + '"><span class="dv-chat-sender">' + (c.sender === 'user' ? '👤 Developer' : '🤖 Agent') + ':</span> ' + esc(c.text) + '</div>';
+            }).join('') + '</div>';
+          } else {
+            stepHtml += '<div class="dv-chat-empty">Send instructions or guidance to the agent for this stage. Messages are delivered directly to the agent\'s interactive terminal and incorporated into stage retry context.</div>';
+          }
+          stepHtml += '<div class="dv-stage-chat-bar">' +
+            '<input type="text" class="dv-stage-chat-input" data-chat-key="' + esc(chatKey) + '" placeholder="Type instructions or chat with agent (Press Enter to send)…" />' +
+            '<button class="dv-btn dv-primary dv-btn-xs" data-act="sendStageChat" data-key="' + esc(w.ticketKey) + '" data-repo="' + esc(w.repoPath) + '" data-step="' + esc(st.id) + '" data-chat-key="' + esc(chatKey) + '">Send</button>' +
+          '</div></div>';
+        }
+
+        stepHtml += "</span></li>";
+        return stepHtml;
       }).join("") + "</ol>";
       if (w.iteration) h += '<div class="dv-note">Fix iterations used: ' + w.iteration + "</div>";
 
@@ -539,6 +577,18 @@
       case "nextStep": post("nextStep", { ticketKey: d.key, repoPath: d.repo }); break;
       case "cancel": post("cancel", { ticketKey: d.key, repoPath: d.repo }); break;
       case "forceQuit": post("forceQuit", { ticketKey: d.key, repoPath: d.repo }); break;
+      case "sendStageChat": {
+        var chatInput = root.querySelector('.dv-stage-chat-input[data-chat-key="' + CSS.escape(d.chatKey) + '"]');
+        var chatMsg = chatInput ? chatInput.value.trim() : "";
+        if (!chatMsg) { toast("Type a message first.", "bad"); break; }
+        post("sendStageChat", { ticketKey: d.key, repoPath: d.repo, stepId: d.step, message: chatMsg });
+        if (chatInput) chatInput.value = "";
+        break;
+      }
+      case "openStageTerminal": {
+        post("openStageTerminal", { ticketKey: d.key, repoPath: d.repo, stepId: d.step });
+        break;
+      }
       case "skip": post("skip", { ticketKey: d.key, repoPath: d.repo }); break;
       case "discard": post("discard", { ticketKey: d.key, repoPath: d.repo }); break;
       case "terminal": post("openTerminal", { ticketKey: d.key, repoPath: d.repo }); break;
@@ -563,6 +613,18 @@
   });
 
   function val(id) { var el = document.getElementById(id); return el ? el.value.trim() : ""; }
+
+  root.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" && !e.shiftKey && e.target && e.target.classList.contains("dv-stage-chat-input")) {
+      e.preventDefault();
+      var inputEl = e.target;
+      var msg = inputEl.value.trim();
+      if (!msg) return;
+      var chatKey = inputEl.dataset.chatKey;
+      var sendBtn = root.querySelector('.dv-btn[data-act="sendStageChat"][data-chat-key="' + CSS.escape(chatKey) + '"]');
+      if (sendBtn) sendBtn.click();
+    }
+  });
 
   root.addEventListener("change", function (e) {
     var t = e.target;
