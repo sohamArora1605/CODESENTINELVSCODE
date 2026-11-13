@@ -11,6 +11,14 @@ import { WorkspaceContext } from "../types";
 import { GraphService } from "../graph/graphService";
 import { VulnerabilityScanner, ClubbedFinding } from "../scanner/vulnerabilityScanner";
 import { CegarVerifier } from "../scanner/cegarVerifier";
+import { MultiRepoManager } from "../repo/multiRepoManager";
+import { GitSyncService } from "../git/gitSyncService";
+import { JiraService } from "../jira/jiraService";
+import { SecretVault } from "../security/secretVault";
+import { TestRunnerService } from "../testing/testRunnerService";
+import { WorkflowEngine } from "../agent/workflowEngine";
+import { getRepoConfig, setRepoConfig } from "../config/settings";
+import { AgentTerminalLauncher, AgentHarnessType } from "../agent/agentTerminalLauncher";
 
 export type McpToolHandler = (args: any, context?: WorkspaceContext | null) => Promise<{
   content: Array<{ type: "text"; text: string }>;
@@ -27,7 +35,7 @@ export class CodeSentinelMcpServer {
   private tools: Map<string, RegisteredTool> = new Map();
   private getActiveWorkspaceFn?: () => WorkspaceContext | null;
 
-  constructor(serverName = "codesentinel-mcp", version = "0.2.3") {
+  constructor(serverName = "codesentinel-mcp", version = "0.3.3") {
     this.server = new Server(
       {
         name: serverName,
@@ -1168,6 +1176,42 @@ export class CodeSentinelMcpServer {
           remediation: "Store webhook URLs in environment variables or secret managers and rotate the webhook.",
         },
         {
+          pattern: /(?:aws_secret_access_key|secretAccessKey|AWS_SECRET_ACCESS_KEY)["']?\s*[:=]\s*["'][A-Za-z0-9/+=]{40}["']/,
+          title: "Hardcoded AWS Secret Access Key",
+          severity: "Critical",
+          cwe: "CWE-798",
+          category: "Hardcoded Secrets & Infrastructure",
+          desc: "AWS secret access key literal embedded in source.",
+          remediation: "Rotate the key immediately and load credentials from the SDK default chain / IAM roles.",
+        },
+        {
+          pattern: /["']?ACL["']?\s*[:=]\s*["']public-read(?:-write)?["']|acl\s*=\s*"public-read(?:-write)?"|block_public_(?:acls|policy)\s*=\s*false|AllUsers/,
+          title: "Publicly Accessible Storage (public ACL / public access block disabled)",
+          severity: "High",
+          cwe: "CWE-732",
+          category: "Storage & Data Exposure",
+          desc: "Storage object or bucket is made world-readable/writable via a public ACL or by disabling the public access block.",
+          remediation: "Use private ACLs, enable S3 Block Public Access, and serve content through signed URLs or CloudFront OAC.",
+        },
+        {
+          pattern: /\b(?:fetch|axios(?:\.(?:get|post|put|request))?|got|requests\.(?:get|post|put)|urlopen|http\.Get|HttpClient\.[A-Za-z]+)\s*\(\s*(?:req(?:uest)?\.(?:query|body|params)|params|ctx\.query|c\.Query|input\.url)/,
+          title: "User-Controlled Outbound Request (SSRF)",
+          severity: "High",
+          cwe: "CWE-918",
+          category: "SSRF & Metadata Abuse",
+          desc: "An outbound HTTP request is made with a destination taken directly from request input, allowing access to internal services and cloud metadata endpoints.",
+          remediation: "Validate scheme and host against an allowlist, resolve DNS and reject private/link-local ranges (10/8, 172.16/12, 192.168/16, 169.254/16, loopback).",
+        },
+        {
+          pattern: /["']?Action["']?\s*[:=]\s*["']\*["']|actions\s*=\s*\[\s*"\*"\s*\]/,
+          title: "Wildcard IAM Action",
+          severity: "High",
+          cwe: "CWE-269",
+          category: "IAM & Privilege",
+          desc: "IAM policy grants every action (\"*\"), violating least privilege.",
+          remediation: "Enumerate only the required actions and scope Resource to specific ARNs.",
+        },
+        {
           pattern: /169\.254\.169\.254|metadata\.google\.internal/,
           title: "Direct Cloud Instance Metadata Service (IMDS) Reference",
           severity: "Medium",
@@ -1196,6 +1240,9 @@ export class CodeSentinelMcpServer {
         try {
           const content = fs.readFileSync(absPath, "utf-8");
           const lines = content.split(/\r?\n/);
+          if (/aws-sdk|@aws-sdk|boto3|botocore|amazonaws\.com/.test(content)) detectedCloudProviders.push("AWS");
+          if (/@google-cloud|google\.cloud|googleapis\.com|firebase-admin/.test(content)) detectedCloudProviders.push("GCP");
+          if (/@azure\/|azure\.(?:storage|identity|mgmt)|windows\.net/.test(content)) detectedCloudProviders.push("Azure");
           for (let i = 0; i < lines.length; i++) {
             const lineStr = lines[i];
             for (const sec of secretRegexes) {
@@ -1545,6 +1592,654 @@ export class CodeSentinelMcpServer {
       "Mathematically verify or refute a security alert or candidate code vulnerability using Counterexample-Guided Abstraction Refinement (CEGAR). Returns CONFIRMED, DEFENDED, or CANDIDATE verdict with proof.",
       cegarVerifySchema,
       cegarVerifyHandler
+    );
+
+    // =========================================================================
+    // Autonomous Multi-Repo & Git Code Graph Synchronization Tools
+    // =========================================================================
+
+    // Tool: Multi-repo status
+    this.registerTool(
+      "codesentinel_multi_repo_status",
+      "Inspect all managed repositories, active workspace, current Git branches, working tree dirty status, and Atlas Code Graph index state.",
+      {
+        type: "object",
+        properties: {},
+      },
+      async (_args, context) => {
+        const multiRepo = MultiRepoManager.getInstance();
+        await multiRepo.syncWithWorkspace();
+        const repos = multiRepo.getRepositories();
+        const active = multiRepo.getActiveRepo() || context;
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  activeRepository: active ? (typeof active === "object" && "path" in active ? active.path : (active as any).rootPath) : null,
+                  totalRepositories: repos.length,
+                  repositories: repos,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+    );
+
+    // Tool: Switch active repository
+    this.registerTool(
+      "codesentinel_switch_repo",
+      "Switch the active repository context for CodeSentinel, code graph navigation, scans, and AI agent commands.",
+      {
+        type: "object",
+        properties: {
+          repoPath: { type: "string", description: "Absolute path or directory name of repository to activate" },
+        },
+        required: ["repoPath"],
+      },
+      async (args) => {
+        const multiRepo = MultiRepoManager.getInstance();
+        const switched = multiRepo.setActiveRepo(args.repoPath);
+        if (!switched) {
+          try {
+            const added = await multiRepo.addRepository(args.repoPath);
+            return {
+              content: [{ type: "text", text: `Added and activated repository: ${added.name} (${added.path})` }],
+            };
+          } catch (e: any) {
+            return {
+              content: [{ type: "text", text: `Failed to switch repository: ${e.message}` }],
+              isError: true,
+            };
+          }
+        }
+        return {
+          content: [{ type: "text", text: `Switched active repository to: ${switched.name} (${switched.path}) [Branch: ${switched.currentBranch}]` }],
+        };
+      }
+    );
+
+    // Tool: Git Code Graph Auto-Sync
+    this.registerTool(
+      "codesentinel_git_sync_graph",
+      "Synchronize Atlas Code Graph with current Git branch changes. Fast-restores branch graph snapshots when available and delta-indexes newly modified files.",
+      {
+        type: "object",
+        properties: {
+          repoPath: { type: "string", description: "Optional repository path (defaults to active repository)" },
+          branch: { type: "string", description: "Optional target branch name" },
+        },
+      },
+      async (args, context) => {
+        const ctx = context || this.resolveContext();
+        const repoPath = args?.repoPath || MultiRepoManager.getInstance().getActiveRepoPath() || ctx.rootPath;
+        const gitSync = GitSyncService.getInstance();
+        const res = await gitSync.syncCodeGraph(repoPath, args?.branch);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(res, null, 2),
+            },
+          ],
+        };
+      }
+    );
+
+    // =========================================================================
+    // Atlassian Jira Integration Tools
+    // =========================================================================
+
+    // Tool: List Jira tickets
+    this.registerTool(
+      "codesentinel_jira_list_tickets",
+      "List Jira tickets assigned or available for development. Supports status filters ('To Do', 'In Progress', 'In Review', 'Done') and text queries.",
+      {
+        type: "object",
+        properties: {
+          status: { type: "string", description: "Filter by ticket status (e.g. 'To Do', 'In Progress', 'All')" },
+          query: { type: "string", description: "Optional search query" },
+        },
+      },
+      async (args) => {
+        const jira = JiraService.getInstance();
+        const tickets = await jira.listTickets({ status: args?.status, query: args?.query });
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  jiraMode: jira.getMode(),
+                  note: jira.getMode() === "disabled" ? "Jira is disabled (codesentinel.jira.mode). Start work from a custom task or enable manual/harness mode." : undefined,
+                  count: tickets.length,
+                  tickets,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+    );
+
+    // Tool: Get single Jira ticket
+    this.registerTool(
+      "codesentinel_jira_get_ticket",
+      "Retrieve full details, acceptance criteria, components, and suggested branch name for a specific Jira ticket.",
+      {
+        type: "object",
+        properties: {
+          ticketKey: { type: "string", description: "Jira ticket key (e.g. SEC-101, AUTH-204)" },
+        },
+        required: ["ticketKey"],
+      },
+      async (args) => {
+        const jira = JiraService.getInstance();
+        const ticket = await jira.getTicket(args.ticketKey);
+        if (!ticket) {
+          return {
+            content: [{ type: "text", text: `Ticket '${args.ticketKey}' not found.` }],
+            isError: true,
+          };
+        }
+        const suggestedBranch = jira.generateBranchName(ticket);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ ...ticket, suggestedBranch }, null, 2),
+            },
+          ],
+        };
+      }
+    );
+
+    // Tool: Update Jira ticket status & comment
+    this.registerTool(
+      "codesentinel_jira_update_ticket",
+      "Update a Jira ticket status (e.g. 'In Progress', 'In Review', 'Done') and append work log comments.",
+      {
+        type: "object",
+        properties: {
+          ticketKey: { type: "string", description: "Jira ticket key (e.g. SEC-101)" },
+          status: { type: "string", description: "Target status name" },
+          comment: { type: "string", description: "Optional comment or work summary to post" },
+        },
+        required: ["ticketKey", "status"],
+      },
+      async (args) => {
+        const jira = JiraService.getInstance();
+        const res = await jira.updateTicketStatus(args.ticketKey, args.status, args.comment);
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(res, null, 2),
+            },
+          ],
+        };
+      }
+    );
+
+    // =========================================================================
+    // Autonomous Developer & Security Workflow Orchestration Tools
+    // =========================================================================
+
+    // Tool: Start Ticket Workflow (runs in the background; poll with codesentinel_workflow_status)
+    this.registerTool(
+      "codesentinel_workflow_start_ticket",
+      "Start the autonomous ticket workflow in the background: cut a feature branch (isolated worktree), planner agent, developer agent, changed-files security scan, tester/fix loop, stage+API and Playwright tests, then commit and (after approval or when autoPush is on) push the branch. Returns immediately; poll codesentinel_workflow_status. Several tickets can run in parallel.",
+      {
+        type: "object",
+        properties: {
+          ticketKey: { type: "string", description: "Jira ticket key (e.g. SEC-101)" },
+          repoPath: { type: "string", description: "Repository path (defaults to the active repository)" },
+          baseBranch: { type: "string", description: "Branch to cut from (defaults to the repo's first configured base branch)" },
+          branchName: { type: "string", description: "Exact branch name; overrides the template" },
+          branchTemplate: { type: "string", description: "Branch naming template, e.g. feature/${ticketKey}-${slug}" },
+          harness: { type: "string", enum: ["claude-code", "gemini-antigravity", "opencode"], description: "Agent harness for headless steps" },
+          taskSummary: { type: "string", description: "Custom task: when set, no Jira lookup is done. Use a key like TASK-1 for ticketKey." },
+          taskDescription: { type: "string", description: "Custom task details / acceptance criteria" },
+          requirePlanApproval: { type: "boolean", description: "Pause after the plan until codesentinel_workflow_resume" },
+          autoPush: { type: "boolean", description: "Push automatically when all gates pass (default: wait for approval)" },
+        },
+        required: ["ticketKey"],
+      },
+      async (args, context) => {
+        const ctx = context || this.resolveContext();
+        const repoPath = args?.repoPath || MultiRepoManager.getInstance().getActiveRepoPath() || ctx.rootPath;
+        try {
+          const wf = await WorkflowEngine.getInstance().start(
+            args.ticketKey, repoPath,
+            { baseBranch: args.baseBranch, targetBranch: args.branchName, branchTemplate: args.branchTemplate,
+              harness: args.harness, requirePlanApproval: args.requirePlanApproval, autoPush: args.autoPush,
+              ticket: args.taskSummary ? { key: String(args.ticketKey).toUpperCase(), summary: String(args.taskSummary).slice(0, 200), description: String(args.taskDescription || "").slice(0, 8000), status: "To Do", priority: "Medium", issueType: "Task", labels: [], components: [] } : undefined },
+            false
+          );
+          return { content: [{ type: "text", text: JSON.stringify({ started: true, id: wf.id, branch: wf.targetBranch, base: wf.baseBranch, note: "Poll codesentinel_workflow_status for progress." }, null, 2) }] };
+        } catch (e: any) {
+          return { content: [{ type: "text", text: `Could not start workflow: ${e.message}` }], isError: true };
+        }
+      }
+    );
+
+    this.registerTool(
+      "codesentinel_workflow_status",
+      "Status of ticket workflows: step states, logs, plan, scan/test results, and what (if anything) is awaiting approval. Omit ticketKey to list all workflows of the repository.",
+      {
+        type: "object",
+        properties: {
+          ticketKey: { type: "string" },
+          repoPath: { type: "string" },
+        },
+      },
+      async (args, context) => {
+        const ctx = context || this.resolveContext();
+        const repoPath = args?.repoPath || MultiRepoManager.getInstance().getActiveRepoPath() || ctx.rootPath;
+        const engine = WorkflowEngine.getInstance();
+        const list = args?.ticketKey ? [engine.getWorkflow(args.ticketKey, repoPath)].filter(Boolean) : engine.loadRepo(repoPath);
+        if (list.length === 0) return { content: [{ type: "text", text: "No workflows found." }] };
+        const out = list.map((w: any) => args?.ticketKey ? w : {
+          id: w.id, status: w.status, awaiting: w.awaiting, branch: w.targetBranch, iteration: w.iteration,
+          steps: w.steps.map((s: any) => `${s.name}: ${s.status}${s.summary ? ` - ${s.summary}` : ""}`),
+        });
+        return { content: [{ type: "text", text: JSON.stringify(out, null, 2) }] };
+      }
+    );
+
+    this.registerTool(
+      "codesentinel_workflow_resume",
+      "Approve a paused workflow (plan approval or push approval) or retry a failed one from its failed step.",
+      { type: "object", properties: { ticketKey: { type: "string" }, repoPath: { type: "string" } }, required: ["ticketKey"] },
+      async (args, context) => {
+        const ctx = context || this.resolveContext();
+        const repoPath = args?.repoPath || MultiRepoManager.getInstance().getActiveRepoPath() || ctx.rootPath;
+        try {
+          const engine = WorkflowEngine.getInstance();
+          const wf = engine.getWorkflow(args.ticketKey, repoPath);
+          if (!wf) return { content: [{ type: "text", text: "No such workflow." }], isError: true };
+          void engine.resume(args.ticketKey, repoPath);
+          return { content: [{ type: "text", text: `Resumed ${wf.id} (was ${wf.status}${wf.awaiting ? `, awaiting ${wf.awaiting}` : ""}). Poll codesentinel_workflow_status.` }] };
+        } catch (e: any) {
+          return { content: [{ type: "text", text: e.message }], isError: true };
+        }
+      }
+    );
+
+    this.registerTool(
+      "codesentinel_workflow_cancel",
+      "Cancel a running or paused ticket workflow.",
+      { type: "object", properties: { ticketKey: { type: "string" }, repoPath: { type: "string" } }, required: ["ticketKey"] },
+      async (args, context) => {
+        const ctx = context || this.resolveContext();
+        const repoPath = args?.repoPath || MultiRepoManager.getInstance().getActiveRepoPath() || ctx.rootPath;
+        const ok = WorkflowEngine.getInstance().cancel(args.ticketKey, repoPath);
+        return { content: [{ type: "text", text: ok ? "Cancel requested." : "No such workflow." }], isError: !ok };
+      }
+    );
+
+    this.registerTool(
+      "codesentinel_workflow_skip",
+      "Skip the failed stage of a ticket workflow (for example a stuck developer step) and continue with the next stage. Not allowed at the push gate.",
+      { type: "object", properties: { ticketKey: { type: "string" }, repoPath: { type: "string" } }, required: ["ticketKey"] },
+      async (args, context) => {
+        const ctx = context || this.resolveContext();
+        const repoPath = args?.repoPath || MultiRepoManager.getInstance().getActiveRepoPath() || ctx.rootPath;
+        try {
+          void WorkflowEngine.getInstance().skip(args.ticketKey, repoPath).catch(() => {});
+          return { content: [{ type: "text", text: "Skipping the failed stage and continuing. Poll codesentinel_workflow_status." }] };
+        } catch (e: any) {
+          return { content: [{ type: "text", text: e.message }], isError: true };
+        }
+      }
+    );
+
+    this.registerTool(
+      "codesentinel_workflow_discard",
+      "Undo a ticket workflow: stop it, remove its worktree, delete the LOCAL feature branch and the workflow record. Destructive: requires confirm=true. Never deletes remote branches, protected branches, or uncommitted work in the main checkout.",
+      { type: "object", properties: { ticketKey: { type: "string" }, repoPath: { type: "string" }, confirm: { type: "boolean", description: "Must be true" } }, required: ["ticketKey", "confirm"] },
+      async (args, context) => {
+        if (args?.confirm !== true) return { content: [{ type: "text", text: "Refusing: pass confirm=true to discard the workflow and delete its branch." }], isError: true };
+        const ctx = context || this.resolveContext();
+        const repoPath = args?.repoPath || MultiRepoManager.getInstance().getActiveRepoPath() || ctx.rootPath;
+        try {
+          const r = await WorkflowEngine.getInstance().discard(args.ticketKey, repoPath);
+          return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
+        } catch (e: any) {
+          return { content: [{ type: "text", text: e.message }], isError: true };
+        }
+      }
+    );
+
+    // Tool: Plan Ticket (Planner Agent, read-only)
+    this.registerTool(
+      "codesentinel_workflow_plan_ticket",
+      "Planner agent only: reads the ticket and the code graph and returns an implementation plan. Makes no branch and no edits.",
+      {
+        type: "object",
+        properties: {
+          ticketKey: { type: "string", description: "Jira ticket key (e.g. SEC-101)" },
+          repoPath: { type: "string", description: "Optional repository folder path" },
+        },
+        required: ["ticketKey"],
+      },
+      async (args, context) => {
+        const ctx = context || this.resolveContext();
+        const repoPath = args?.repoPath || MultiRepoManager.getInstance().getActiveRepoPath() || ctx.rootPath;
+        try {
+          return { content: [{ type: "text", text: await WorkflowEngine.getInstance().planOnly(args.ticketKey, repoPath) }] };
+        } catch (e: any) {
+          return { content: [{ type: "text", text: e.message }], isError: true };
+        }
+      }
+    );
+
+    this.registerTool(
+      "codesentinel_repo_config",
+      "Read or update per-repository CodeSentinel configuration: branch naming template, allowed base branches, branch mode (auto/ask), test commands, stage deploy mode/command/base URL, and Playwright/API testing toggles.",
+      {
+        type: "object",
+        properties: {
+          repoPath: { type: "string" },
+          set: { type: "object", description: "Fields to update (omit to just read)" },
+        },
+      },
+      async (args, context) => {
+        const ctx = context || this.resolveContext();
+        const repoPath = args?.repoPath || MultiRepoManager.getInstance().getActiveRepoPath() || ctx.rootPath;
+        const cfg = args?.set ? setRepoConfig(repoPath, args.set) : getRepoConfig(repoPath);
+        return { content: [{ type: "text", text: JSON.stringify({ repoPath, config: cfg }, null, 2) }] };
+      }
+    );
+
+    this.registerTool(
+      "codesentinel_test_status",
+      "Last recorded unit / stage-API / Playwright results for a repository (pass, fail, skipped counts) without running anything.",
+      { type: "object", properties: { repoPath: { type: "string" } } },
+      async (args, context) => {
+        const ctx = context || this.resolveContext();
+        const repoPath = args?.repoPath || MultiRepoManager.getInstance().getActiveRepoPath() || ctx.rootPath;
+        const s = TestRunnerService.getInstance().getSummary(repoPath);
+        const slim = (r: any) => r && { status: r.status, passed: r.passedCount, failed: r.failedCount, skipped: r.skippedCount, total: r.totalTests, ms: r.durationMs, note: r.status === "passed" ? undefined : (r.error || r.output?.slice(0, 200)) };
+        return { content: [{ type: "text", text: JSON.stringify({ repo: s.repoName, overall: s.overallStatus, unit: slim(s.unit), stageApi: slim(s.stageApi), playwright: slim(s.playwright), lastRun: s.lastRunTimestamp }, null, 2) }] };
+      }
+    );
+
+    // Tool: Incremental Diff Security Scan
+    this.registerTool(
+      "codesentinel_scan_git_diff",
+      "Scan ONLY the files modified on the current branch / git diff against base branch for static security vulnerabilities (SAST, secrets, AST dataflow). Lightning fast compared to full repository scan.",
+      {
+        type: "object",
+        properties: {
+          repoPath: { type: "string", description: "Optional repository folder path" },
+          baseBranch: { type: "string", description: "Base branch to diff against (default: main)" },
+        },
+      },
+      async (args, context) => {
+        const ctx = context || this.resolveContext();
+        const repoPath = args?.repoPath || MultiRepoManager.getInstance().getActiveRepoPath() || ctx.rootPath;
+        const gitSync = GitSyncService.getInstance();
+        const base = args?.baseBranch || "main";
+        const modifiedFiles = (await gitSync.getModifiedFilesDiff(repoPath, base)).filter((f) => !f.startsWith(".codesentinel/"));
+        const scanner = VulnerabilityScanner.getInstance();
+        // File-scoped, always fresh: never served from the full-scan cache
+        const result = modifiedFiles.length
+          ? await scanner.scanProject(repoPath, undefined, true, { onlyFiles: modifiedFiles })
+          : { findings: [] as ClubbedFinding[] };
+        const diffFindings = result.findings;
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                { baseBranch: base, modifiedFilesCount: modifiedFiles.length, modifiedFiles, diffFindingsCount: diffFindings.length, findings: diffFindings },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+    );
+
+    // Tool: Verify Candidate Finding with CEGAR & Generate Unit Tests
+    this.registerTool(
+      "codesentinel_verify_and_test_finding",
+      "Evaluate a candidate security finding: evaluates False Positive vs Genuine using CEGAR formal proof, refutes false alarms, and generates unit test assertions for genuine vulnerabilities.",
+      {
+        type: "object",
+        properties: {
+          filePath: { type: "string", description: "File path containing the vulnerability" },
+          line: { type: "number", description: "Line number" },
+          cwe: { type: "string", description: "CWE identifier (e.g. CWE-78, CWE-89, CWE-918)" },
+          title: { type: "string", description: "Vulnerability title" },
+          snippet: { type: "string", description: "Code snippet" },
+          symbolName: { type: "string", description: "Function or method name" },
+          repoPath: { type: "string", description: "Optional repository path" },
+        },
+        required: ["filePath", "line"],
+      },
+      async (args, context) => {
+        const ctx = context || this.resolveContext();
+        const repoPath = args?.repoPath || MultiRepoManager.getInstance().getActiveRepoPath() || ctx.rootPath;
+        const finding: ClubbedFinding = {
+          id: `FIND-${Date.now()}`,
+          title: args.title || `Vulnerability check at ${args.filePath}:${args.line}`,
+          severity: "High",
+          cwe: args.cwe || "CWE-20",
+          category: "Security",
+          filePath: args.filePath,
+          line: Number(args.line),
+          endLine: Number(args.line),
+          snippet: args.snippet || "",
+          description: "Candidate security finding for formal verification",
+          remediation: "",
+          tools: ["CodeSentinel CEGAR Tester"],
+          symbolName: args.symbolName,
+        };
+
+        const verifier = CegarVerifier.getInstance();
+        const ver = await verifier.verifyFinding(finding, repoPath);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  verdict: ver.verdict,
+                  isFalsePositive: ver.verdict === "DEFENDED",
+                  isGenuine: ver.verdict === "CONFIRMED",
+                  confidence: ver.confidence,
+                  proof: ver.proof,
+                  reason: ver.reason,
+                  trace: ver.trace,
+                  testGuidance: ver.verdict === "CONFIRMED" ? `Write a regression test that feeds attacker-controlled input to the code at ${finding.filePath}:${finding.line} (${finding.cwe}) and asserts it is rejected or neutralized; it must fail before the fix and pass after.` : undefined,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+    );
+
+    // Tool: Manage Secrets for Stage & API Testing
+    this.registerTool(
+      "codesentinel_secrets_manage",
+      "Store, check existence of, list, or delete stage API testing secrets (values are never returned; prefer the CodeSentinel UI to enter them so they stay out of chat history), tokens, and deployment credentials (scoped per ticket, per repo, or globally).",
+      {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["get", "set", "list", "delete"], description: "Action to perform" },
+          key: { type: "string", description: "Secret identifier (e.g. stage_api_key, auth_token)" },
+          value: { type: "string", description: "Secret value (required for 'set')" },
+          scope: { type: "string", enum: ["ticket", "repo", "global"], description: "Secret scope (default: global)" },
+          scopeId: { type: "string", description: "Scope identifier (ticket key like SEC-101 or repo name)" },
+          description: { type: "string", description: "Optional description" },
+        },
+        required: ["action"],
+      },
+      async (args) => {
+        const vault = SecretVault.getInstance();
+        const scope = args?.scope || "global";
+        const scopeId = args?.scopeId;
+
+        switch (args.action) {
+          case "get": {
+            if (!args.key) return { content: [{ type: "text", text: "Key required for 'get'" }], isError: true };
+            // Existence only: secret values are never returned to an agent.
+            const val = await vault.getSecret(args.key, scope, scopeId);
+            return { content: [{ type: "text", text: val ? `Secret '${args.key}' exists (value hidden).` : "Secret not found." }] };
+          }
+          case "set": {
+            if (!args.key || !args.value) return { content: [{ type: "text", text: "Both key and value required for 'set'" }], isError: true };
+            await vault.setSecret(args.key, args.value, scope, scopeId, args.description);
+            return {
+              content: [{ type: "text", text: `Secret '${args.key}' stored securely in scope '${scope}${scopeId ? `:${scopeId}` : ""}'.` }],
+            };
+          }
+          case "delete": {
+            if (!args.key) return { content: [{ type: "text", text: "Key required for 'delete'" }], isError: true };
+            await vault.deleteSecret(args.key, scope, scopeId);
+            return {
+              content: [{ type: "text", text: `Secret '${args.key}' deleted from scope '${scope}'.` }],
+            };
+          }
+          case "list":
+          default: {
+            const list = await vault.listSecrets(scope, scopeId);
+            return {
+              content: [{ type: "text", text: JSON.stringify(list, null, 2) }],
+            };
+          }
+        }
+      }
+    );
+
+    // Tool: Run Tests (Unit, Stage API, Playwright)
+    this.registerTool(
+      "codesentinel_run_tests",
+      "Run unit tests, stage API endpoint validation, or Playwright frontend E2E browser tests for a repository, reporting pass/fail stats and durations.",
+      {
+        type: "object",
+        properties: {
+          suite: { type: "string", enum: ["all", "unit", "stage_api", "playwright"], description: "Test suite to execute" },
+          repoPath: { type: "string", description: "Optional repository path" },
+          ticketKey: { type: "string", description: "Optional ticket key context for stage testing secrets" },
+        },
+        required: ["suite"],
+      },
+      async (args, context) => {
+        const ctx = context || this.resolveContext();
+        const repoPath = args?.repoPath || MultiRepoManager.getInstance().getActiveRepoPath() || ctx.rootPath;
+        const testRunner = TestRunnerService.getInstance();
+
+        switch (args.suite) {
+          case "unit": {
+            const res = await testRunner.runUnitTests(repoPath);
+            return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
+          }
+          case "stage_api": {
+            const res = await testRunner.runStageApiTests(repoPath, args?.ticketKey);
+            return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
+          }
+          case "playwright": {
+            const res = await testRunner.runPlaywrightTests(repoPath);
+            return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
+          }
+          case "all":
+          default: {
+            const summary = await testRunner.runAllTests(repoPath, args?.ticketKey);
+            return { content: [{ type: "text", text: JSON.stringify(summary, null, 2) }] };
+          }
+        }
+      }
+    );
+
+    // Tool: Push Ticket Branch
+    this.registerTool(
+      "codesentinel_push_ticket_branch",
+      "Safely push a feature branch to remote (blocking main/production release branches) and append PR link & test audit to Jira.",
+      {
+        type: "object",
+        properties: {
+          ticketKey: { type: "string", description: "Jira ticket key" },
+          branchName: { type: "string", description: "Branch name to push" },
+          repoPath: { type: "string", description: "Optional repository path" },
+        },
+        required: ["ticketKey", "branchName"],
+      },
+      async (args, context) => {
+        const ctx = context || this.resolveContext();
+        const repoPath = args?.repoPath || MultiRepoManager.getInstance().getActiveRepoPath() || ctx.rootPath;
+        const gitSync = GitSyncService.getInstance();
+        const res = await gitSync.pushBranch(repoPath, args.branchName);
+
+        if (res.success) {
+          await JiraService.getInstance().updateTicketStatus(
+            args.ticketKey,
+            "In Review",
+            `Branch '${args.branchName}' pushed to remote. Ready for code review.`
+          );
+        }
+
+        return {
+          content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
+          isError: !res.success,
+        };
+      }
+    );
+
+    // Tool: Launch Agent Terminal
+    this.registerTool(
+      "codesentinel_launch_agent_terminal",
+      "Launch an interactive AI coding terminal (Claude Code, Antigravity / Gemini CLI, or OpenCode) configured with workspace MCP tools and ticket context.",
+      {
+        type: "object",
+        properties: {
+          harness: { type: "string", enum: ["claude-code", "gemini-antigravity", "opencode"], description: "AI coding harness to launch" },
+          repoPath: { type: "string", description: "Optional repository folder path" },
+          ticketKey: { type: "string", description: "Optional Jira ticket key context" },
+          prompt: { type: "string", description: "Initial instruction/prompt to send to the agent" },
+        },
+      },
+      async (args, context) => {
+        const ctx = context || this.resolveContext();
+        const repoPath = args?.repoPath || MultiRepoManager.getInstance().getActiveRepoPath() || ctx.rootPath;
+        const harness = (args?.harness as AgentHarnessType) || "claude-code";
+
+        try {
+          const launcher = AgentTerminalLauncher.getInstance();
+          let ticketCtx: any = undefined;
+          if (args?.ticketKey) {
+            const ticket = await JiraService.getInstance().getTicket(args.ticketKey);
+            if (ticket) {
+              const currentBranch = await GitSyncService.getInstance().getCurrentBranch(repoPath);
+              ticketCtx = { key: ticket.key, summary: ticket.summary, branch: currentBranch };
+            }
+          }
+
+          launcher.launchAgentTerminal(repoPath, harness, args?.prompt, ticketCtx);
+          return {
+            content: [{ type: "text", text: `Launched ${harness} terminal in ${repoPath}` }],
+          };
+        } catch (e: any) {
+          return {
+            content: [{ type: "text", text: `Failed to launch agent terminal (requires the CodeSentinel VS Code extension host): ${e.message}` }],
+            isError: true,
+          };
+        }
+      }
     );
   }
 }

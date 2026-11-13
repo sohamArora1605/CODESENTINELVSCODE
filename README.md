@@ -43,3 +43,22 @@ CodeSentinel provides a self-contained, zero-Docker security auditing and SAST e
 ## License
 
 MIT
+
+## Autonomous Developer Workflow (Dev tab)
+
+CodeSentinel can take a Jira ticket from "start working" to a pushed feature branch. Everything is configurable under **Dev → Settings** (or `codesentinel.*` settings) and per repository under **Dev → Repos & Tests → Repo settings**.
+
+**Flow per ticket:** cut branch (isolated git worktree, so several tickets/agents run in parallel) → planner agent (read-only) → developer agent → security scan of *changed files only* → CEGAR proof + tester agent triage + unit tests → fixer loop (bounded by `workflow.maxFixIterations`) → stage/API tests → Playwright → commit → push (after your approval unless `workflow.autoPush`). `main`/`master`/`develop`/`release`/`prod` are never pushed.
+
+| Toggle | Setting |
+| --- | --- |
+| OpenCode harness | `codesentinel.openCodeEnabled` |
+| Multi-repo | `codesentinel.multiRepoEnabled` |
+| Git auto-sync of the code graph | `codesentinel.gitAutoSyncEnabled` (uses `atlas sync`, only changed files; per-branch graph snapshots) |
+| Jira | `codesentinel.jira.mode`: `disabled` (custom tasks only), `manual` (host/email/project/JQL + encrypted API token) or `harness` (Claude Code / Antigravity read and update tickets through their own Jira connection; the harness needs the Atlassian MCP server registered locally, e.g. `claude mcp add --transport http atlassian https://mcp.atlassian.com/v1/mcp` then authenticate via `/mcp` inside `claude`; connectors added only on claude.ai are not available to headless runs; tune `jira.harnessAllowedTools` to your server name) |
+| Playwright / API tests / stage deploy | `codesentinel.testing.*` and per repo |
+| Agent harness | `codesentinel.defaultAgentHarness` (`claude-code`, `gemini-antigravity` = `agy`, `opencode`) |
+
+Suites that are not configured are reported as **skipped**, never as passed. Secrets (ticket → repo → global scope) are injected as env vars into API tests, masked in output, and never returned to agents.
+
+The same operations are available as MCP tools: `codesentinel_workflow_start_ticket`, `_workflow_status`, `_workflow_resume`, `_workflow_cancel`, `_workflow_plan_ticket`, `_repo_config`, `_test_status`, `_jira_*`, `_git_sync_graph`, `_scan_git_diff`, `_run_tests`, `_secrets_manage`.

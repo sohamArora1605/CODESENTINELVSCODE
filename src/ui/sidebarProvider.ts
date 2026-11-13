@@ -6,6 +6,8 @@ import { OpenCodeLauncher } from "../opencode/opencodeLauncher";
 import { CodeSentinelMcpServer } from "../mcp/mcpServer";
 import { DockerClient } from "../docker/dockerClient";
 import { GraphService } from "../graph/graphService";
+import { DevPanelController } from "./devPanel";
+import { getSetting } from "../config/settings";
 import { VulnerabilityScanner } from "../scanner/vulnerabilityScanner";
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
@@ -21,12 +23,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     return this._outputChannel;
   }
 
+  private readonly _dev: DevPanelController;
+
   constructor(
     private readonly _extensionUri: vscode.Uri,
     private readonly _workspaceManager: WorkspaceManager,
     private readonly _opencodeLauncher: OpenCodeLauncher,
     private readonly _mcpServer: CodeSentinelMcpServer
   ) {
+    this._dev = new DevPanelController();
     // Listen to DependencyManager setup progress to notify webview in real-time
     import("../services/dependencyManager").then(({ DependencyManager }) => {
       DependencyManager.getInstance().onProgress((progress) => {
@@ -70,6 +75,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     };
 
     webviewView.webview.html = this.getHtmlContent(webviewView.webview);
+    this._dev.attach((msg) => this._view?.webview.postMessage(msg));
 
     // Immediately broadcast any active or recent dependency provisioning progress to the newly opened webview
     import("../services/dependencyManager")
@@ -130,6 +136,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     webviewView.webview.onDidReceiveMessage(async (data) => {
+      if (typeof data?.command === "string" && data.command.startsWith("dev:")) {
+        await this._dev.handle(data);
+        return;
+      }
       const workspace = this._workspaceManager.getContext();
 
       switch (data.command) {
@@ -562,7 +572,27 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     this.refreshContainerStatus();
   }
 
+  /** Called when codesentinel.openCodeEnabled changes (UI toggle or settings.json). */
+  public setOpenCodeEnabled(enabled: boolean): void {
+    const root = this._workspaceManager.getContext()?.rootPath;
+    if (!enabled) {
+      this._opencodeLauncher.stopWebProcess();
+      this.updateWebviewContent();
+      return;
+    }
+    if (root) {
+      this._ensureMcpAndStart(root)
+        .then((url) => {
+          if (url) this._view?.webview.postMessage({ command: "setServerUrl", url });
+          this.updateWebviewContent();
+        })
+        .catch(() => {});
+    }
+  }
+
   private async _ensureMcpAndStart(rootPath: string): Promise<string> {
+    // OpenCode is a configurable harness: when disabled nothing is started
+    if (!getSetting<boolean>("openCodeEnabled", true)) return "";
     const config = vscode.workspace.getConfiguration("codesentinel");
     const mcpScript = path.join(this._extensionUri.fsPath, "dist", "mcp-server.js");
     await this._opencodeLauncher.syncWorkspaceConfig(rootPath, mcpScript, {
@@ -611,7 +641,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private getHtmlContent(_webview: vscode.Webview): string {
+  private getHtmlContent(webview: vscode.Webview): string {
+    const devJs = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, "resources", "devPanel.js"));
+    const devCss = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, "resources", "devPanel.css"));
     const workspace = this._workspaceManager.getContext();
     const config = vscode.workspace.getConfiguration("codesentinel");
     const backendMode = config.get<string>("backendMode", "local");
@@ -678,7 +710,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-src http://127.0.0.1:* http://localhost:*; connect-src http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*;">
+      <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: data:; style-src 'unsafe-inline' ${webview.cspSource}; script-src 'unsafe-inline' ${webview.cspSource}; frame-src http://127.0.0.1:* http://localhost:*; connect-src http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*;">
       <title>CodeSentinel</title>
       <style>
         :root {
@@ -2141,6 +2173,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           color: #4ade80;
         }
       </style>
+      <link rel="stylesheet" href="${devCss}">
     </head>
     <body>
       <!-- Ultra-fast Static Skeleton / Instant Splash Screen -->
@@ -2208,6 +2241,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
               <line x1="18" y1="17" x2="14" y2="13.5"/>
             </svg>
             <span>Code Graph</span>
+          </button>
+          <button class="tab-btn" data-tab="tab-dev" title="Developer: tickets, workflows, repos, tests">
+            <svg class="tab-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="16 18 22 12 16 6"/>
+              <polyline points="8 6 2 12 8 18"/>
+            </svg>
+            <span>Dev</span>
           </button>
           <button class="tab-btn" data-tab="tab-workspace" title="Active Workspace">
             <svg class="tab-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -2589,6 +2629,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
               </div>
             </div>
           </div>
+
+          <!-- TAB: Developer (tickets, workflows, repos, tests, settings) -->
+          <div id="tab-dev" class="tab-pane"><div id="dev-root"></div></div>
 
           <!-- TAB: Workspace Details -->
           <div id="tab-workspace" class="tab-pane">
@@ -4297,6 +4340,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           if (splash) splash.classList.add('hidden');
         }, 300);
       </script>
+      <script src="${devJs}"></script>
     </body>
     </html>`;
   }

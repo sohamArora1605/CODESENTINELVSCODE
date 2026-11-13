@@ -5,6 +5,16 @@ import { testDockerClient } from "./dockerClient.test";
 import { testGraphService } from "./graphService.test";
 import { testVulnerabilityScanner } from "./vulnerabilityScanner.test";
 import { testCegarVerifier } from "./cegarVerifier.test";
+import { testGitSync } from "./gitSync.test";
+import { testJiraAndVault } from "./jira.test";
+import { testTestRunner } from "./testRunner.test";
+import { testWorkflowEngine } from "./workflowEngine.test";
+import { testMcpProcess } from "./mcpProcess.test";
+import { testWorkspaceManager } from "./workspaceManager.test";
+import { testMultiRepo } from "./multiRepo.test";
+import { testAgentRunner } from "./agentRunner.test";
+import { testJiraRouting } from "./jiraRouting.test";
+import { testAtlassianMcp } from "./atlassianMcp.test";
 
 async function runAllTests() {
   console.log("==========================================");
@@ -21,9 +31,20 @@ async function runAllTests() {
     { name: "GraphService", fn: testGraphService },
     { name: "VulnerabilityScanner", fn: testVulnerabilityScanner },
     { name: "CegarVerifier", fn: testCegarVerifier },
+    { name: "GitSyncService", fn: testGitSync },
+    { name: "JiraAndVault", fn: testJiraAndVault },
+    { name: "TestRunnerService", fn: testTestRunner },
+    { name: "WorkflowEngine", fn: testWorkflowEngine },
+    { name: "McpProcess", fn: testMcpProcess },
+    { name: "WorkspaceManager", fn: testWorkspaceManager },
+    { name: "MultiRepo", fn: testMultiRepo },
+    { name: "AgentRunner", fn: testAgentRunner },
+    { name: "JiraRouting", fn: testJiraRouting },
+    { name: "AtlassianMcp", fn: testAtlassianMcp },
   ];
 
-  for (const suite of suites) {
+  const only = (process.env.TEST_ONLY || "").split(",").map((x) => x.trim()).filter(Boolean);
+  for (const suite of suites.filter((x) => !only.length || only.includes(x.name))) {
     try {
       await suite.fn();
       passed++;

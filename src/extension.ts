@@ -7,6 +7,13 @@ import { SidebarProvider } from "./ui/sidebarProvider";
 import { DependencyManager } from "./services/dependencyManager";
 import { SecurityToolManager } from "./scanner/securityToolManager";
 import { HarnessRegistry, HarnessId } from "./harness/harnessRegistry";
+import { MultiRepoManager } from "./repo/multiRepoManager";
+import { GitSyncService } from "./git/gitSyncService";
+import { TestRunnerService } from "./testing/testRunnerService";
+import { AgentTerminalLauncher } from "./agent/agentTerminalLauncher";
+import { AtlassianMcp } from "./jira/atlassianMcp";
+import { VulnerabilityScanner } from "./scanner/vulnerabilityScanner";
+import { getSetting, getRepoConfig, writeSettingsSnapshot } from "./config/settings";
 
 let statusBarItem: vscode.StatusBarItem;
 
@@ -26,11 +33,27 @@ export function activate(context: vscode.ExtensionContext) {
       console.warn("Dependency auto-check warning:", err?.message);
     });
 
+  // Shared configuration for out-of-process consumers (MCP server) + feature toggles
+  writeSettingsSnapshot();
+  const gitSync = GitSyncService.getInstance();
+  gitSync.setAutoSyncPredicate(() => getSetting<boolean>("gitAutoSyncEnabled", true));
+  const multiRepo = MultiRepoManager.getInstance();
+
+  // Jira "via agent": headless `claude -p` (needs a locally registered Atlassian MCP server) plus the built-in Atlassian sign-in
+  AtlassianMcp.getInstance().setBrowserOpener(async (url) => {
+    await vscode.env.openExternal(vscode.Uri.parse(url));
+  });
+
   const workspaceManager = WorkspaceManager.getInstance();
   workspaceManager.registerWatchers(context);
+  multiRepo.syncWithWorkspace().catch((e) => console.warn("Multi-repo discovery notice:", e?.message));
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeWorkspaceFolders(() => multiRepo.syncWithWorkspace().catch(() => {})),
+    { dispose: () => gitSync.dispose() }
+  );
 
   const opencodeLauncher = OpenCodeLauncher.getInstance();
-  const mcpServer = new CodeSentinelMcpServer("codesentinel-internal", "0.2.3");
+  const mcpServer = new CodeSentinelMcpServer("codesentinel-internal", "0.3.3");
   mcpServer.setWorkspaceContextResolver(() => workspaceManager.getContext());
 
   // Register Webview View Provider for Activity Bar Sidebar
@@ -88,6 +111,7 @@ export function activate(context: vscode.ExtensionContext) {
     autoSyncMcp(initialRoot).then(async () => {
       // Wait for OpenCode & Atlas dependencies to be verified/provisioned before starting server
       await depsReadyPromise;
+      if (!getSetting<boolean>("openCodeEnabled", true)) return;
       // Automatically launch OpenCode & CodeSentinel MCP service right upon starting extension
       opencodeLauncher
         .startWebProcess(initialRoot)
@@ -102,10 +126,11 @@ export function activate(context: vscode.ExtensionContext) {
 
   workspaceManager.onDidChangeWorkspace(() => {
     updateStatusBar(workspaceManager);
+    multiRepo.syncWithWorkspace().catch(() => {});
     const root = workspaceManager.getActiveWorkspaceRoot();
     if (root) {
       autoSyncMcp(root).then(() => {
-        opencodeLauncher.startWebProcess(root).catch(() => {});
+        if (getSetting<boolean>("openCodeEnabled", true)) opencodeLauncher.startWebProcess(root).catch(() => {});
       });
     }
   });
@@ -390,6 +415,110 @@ export function activate(context: vscode.ExtensionContext) {
       workspaceManager.refreshContext();
       sidebarProvider.updateWebviewContent();
     }
+  );
+
+  // ---- Autonomous developer workflow commands ---------------------------------------------
+  const activeRepoOrWarn = async (): Promise<string | null> => {
+    await multiRepo.syncWithWorkspace();
+    const p = multiRepo.getActiveRepoPath();
+    if (!p) vscode.window.showErrorMessage("CodeSentinel: open a repository folder first.");
+    return p;
+  };
+
+  const cmdToggleOpenCode = vscode.commands.registerCommand("codesentinel.toggleOpenCode", async () => {
+    const next = !getSetting<boolean>("openCodeEnabled", true);
+    await vscode.workspace.getConfiguration("codesentinel").update("openCodeEnabled", next, vscode.ConfigurationTarget.Global);
+    vscode.window.showInformationMessage(`CodeSentinel: OpenCode harness ${next ? "enabled" : "disabled"}.`);
+  });
+
+  const cmdSwitchRepo = vscode.commands.registerCommand("codesentinel.switchActiveRepo", async () => {
+    await multiRepo.syncWithWorkspace();
+    const repos = multiRepo.getRepositories();
+    if (!repos.length) {
+      vscode.window.showErrorMessage("CodeSentinel: no repositories detected.");
+      return;
+    }
+    const pick = await vscode.window.showQuickPick(
+      repos.map((r) => ({ label: r.name, description: r.currentBranch, detail: r.path, path: r.path })),
+      { title: "CodeSentinel: switch active repository" }
+    );
+    if (pick) {
+      multiRepo.setActiveRepo(pick.path);
+      sidebarProvider.updateWebviewContent();
+    }
+  });
+
+  const cmdSyncGitGraph = vscode.commands.registerCommand("codesentinel.syncGitGraph", async () => {
+    const repo = await activeRepoOrWarn();
+    if (!repo) return;
+    await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "CodeSentinel: syncing code graph…" }, async () => {
+      const res = await gitSync.syncCodeGraph(repo);
+      (res.success ? vscode.window.showInformationMessage : vscode.window.showErrorMessage)(`CodeSentinel: ${res.message}`);
+      sidebarProvider.notifyGraphReady();
+    });
+  });
+
+  const cmdOpenJira = vscode.commands.registerCommand("codesentinel.openJiraWorkflows", async () => {
+    await vscode.commands.executeCommand("codesentinel.controlCenter.focus");
+    sidebarProvider.selectTab("tab-dev");
+  });
+
+  const launchAgent = (harness: "claude-code" | "gemini-antigravity") => async () => {
+    const repo = await activeRepoOrWarn();
+    if (repo) AgentTerminalLauncher.getInstance().launchAgentTerminal(repo, harness);
+  };
+  const cmdClaude = vscode.commands.registerCommand("codesentinel.launchClaudeTerminal", launchAgent("claude-code"));
+  const cmdAntigravity = vscode.commands.registerCommand("codesentinel.launchAntigravityTerminal", launchAgent("gemini-antigravity"));
+
+  const diffChannel = vscode.window.createOutputChannel("CodeSentinel Diff Scan");
+  const cmdScanDiff = vscode.commands.registerCommand("codesentinel.scanGitDiff", async () => {
+    const repo = await activeRepoOrWarn();
+    if (!repo) return;
+    const base = getRepoConfig(repo).baseBranches?.[0] || getSetting<string[]>("workflow.baseBranches", ["main"])[0] || "main";
+    const files = (await gitSync.getModifiedFilesDiff(repo, base)).filter((f) => !f.startsWith(".codesentinel/"));
+    if (!files.length) {
+      vscode.window.showInformationMessage("CodeSentinel: no changed files to scan.");
+      return;
+    }
+    await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `CodeSentinel: scanning ${files.length} changed file(s)…` }, async () => {
+      const res = await VulnerabilityScanner.getInstance().scanProject(repo, undefined, true, { onlyFiles: files });
+      diffChannel.clear();
+      for (const f of res.findings) diffChannel.appendLine(`[${f.severity}] ${f.filePath}:${f.line}  ${f.title} (${f.cwe})`);
+      if (res.findings.length) {
+        diffChannel.show(true);
+        vscode.window.showWarningMessage(`CodeSentinel: ${res.findings.length} finding(s) in changed files.`);
+      } else {
+        vscode.window.showInformationMessage(`CodeSentinel: no findings in ${files.length} changed file(s).`);
+      }
+    });
+  });
+
+  const cmdRunAllTests = vscode.commands.registerCommand("codesentinel.runAllTests", async () => {
+    await multiRepo.syncWithWorkspace();
+    const repos = multiRepo.getRepositories();
+    if (!repos.length) {
+      vscode.window.showErrorMessage("CodeSentinel: no repositories detected.");
+      return;
+    }
+    await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "CodeSentinel: running test matrix…" }, async () => {
+      const lines: string[] = [];
+      for (const r of repos) {
+        const s = await TestRunnerService.getInstance().runAllTests(r.path);
+        const f = (x: any) => (x ? (x.status === "skipped" ? "skipped" : `${x.passedCount}/${x.totalTests}`) : "-");
+        lines.push(`${r.name}: ${s.overallStatus} (unit ${f(s.unit)}, api ${f(s.stageApi)}, e2e ${f(s.playwright)})`);
+      }
+      vscode.window.showInformationMessage(`CodeSentinel tests: ${lines.join(" | ")}`);
+    });
+  });
+
+  // OpenCode toggle applies live, whether changed in the UI, the command, or settings.json
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration("codesentinel.openCodeEnabled")) {
+        sidebarProvider.setOpenCodeEnabled(getSetting<boolean>("openCodeEnabled", true));
+      }
+    }),
+    cmdToggleOpenCode, cmdSwitchRepo, cmdSyncGitGraph, cmdOpenJira, cmdClaude, cmdAntigravity, cmdScanDiff, cmdRunAllTests, diffChannel
   );
 
   context.subscriptions.push(

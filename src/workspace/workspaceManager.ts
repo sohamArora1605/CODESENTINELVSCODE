@@ -52,8 +52,11 @@ export class WorkspaceManager {
     // If the active file lives in an external project/folder, use that directly
     const rootPath = externalRoot || (targetFolder ? targetFolder.uri.fsPath : null);
     if (!rootPath) {
+      // Only announce a transition to "no workspace" once. Listeners call getContext(), which
+      // refreshes while the context is null, so firing on every refresh recursed forever.
+      const hadContext = this.currentContext !== null;
       this.currentContext = null;
-      this.onWorkspaceChangeEmitter.fire(null);
+      if (hadContext) this.onWorkspaceChangeEmitter.fire(null);
       return null;
     }
 

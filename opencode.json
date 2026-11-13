@@ -5,30 +5,30 @@
       "type": "local",
       "command": [
         "node",
-        "c:/Users/Soham/.antigravity-ide/extensions/codesentinel.codesentinel-0.2.3/dist/mcp-server.js"
+        "/Users/sohamarora/.vscode/extensions/codesentinel.codesentinel-0.3.3/dist/mcp-server.js"
       ],
       "enabled": true,
       "timeout": 600000,
       "environment": {
-        "CODESENTINEL_WORKSPACE": "d:\\CODESENTINELVSCODE",
-        "CODESENTINEL_STORAGE_PATH": "c:\\Users\\Soham\\AppData\\Roaming\\Antigravity IDE\\User\\globalStorage\\codesentinel.codesentinel",
-        "CODESENTINEL_EXTENSION_PATH": "c:\\Users\\Soham\\.antigravity-ide\\extensions\\codesentinel.codesentinel-0.2.3"
+        "CODESENTINEL_WORKSPACE": "/Users/sohamarora/untitled folder/CODESENTINELVSCODE",
+        "CODESENTINEL_STORAGE_PATH": "/Users/sohamarora/Library/Application Support/Code/User/globalStorage/codesentinel.codesentinel",
+        "CODESENTINEL_EXTENSION_PATH": "/Users/sohamarora/.vscode/extensions/codesentinel.codesentinel-0.3.3"
       }
     },
     "atlas": {
       "type": "local",
       "command": [
         "node",
-        "c:/Users/Soham/.antigravity-ide/extensions/codesentinel.codesentinel-0.2.3/dist/atlas-bridge.js",
+        "/Users/sohamarora/.vscode/extensions/codesentinel.codesentinel-0.3.3/dist/atlas-bridge.js",
         "local",
-        "d:/CODESENTINELVSCODE"
+        "/Users/sohamarora/untitled folder/CODESENTINELVSCODE"
       ],
       "enabled": true,
       "timeout": 600000,
       "environment": {
-        "CODESENTINEL_WORKSPACE": "d:\\CODESENTINELVSCODE",
-        "CODESENTINEL_STORAGE_PATH": "c:\\Users\\Soham\\AppData\\Roaming\\Antigravity IDE\\User\\globalStorage\\codesentinel.codesentinel",
-        "CODESENTINEL_EXTENSION_PATH": "c:\\Users\\Soham\\.antigravity-ide\\extensions\\codesentinel.codesentinel-0.2.3"
+        "CODESENTINEL_WORKSPACE": "/Users/sohamarora/untitled folder/CODESENTINELVSCODE",
+        "CODESENTINEL_STORAGE_PATH": "/Users/sohamarora/Library/Application Support/Code/User/globalStorage/codesentinel.codesentinel",
+        "CODESENTINEL_EXTENSION_PATH": "/Users/sohamarora/.vscode/extensions/codesentinel.codesentinel-0.3.3"
       }
     }
   }

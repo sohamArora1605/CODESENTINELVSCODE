@@ -2,7 +2,7 @@
   "name": "codesentinel",
   "displayName": "CodeSentinel Security Scanner",
   "description": "Multi-language Static Application Security Testing (SAST) & Agentic Security Auditor with MCP & OpenCode integration",
-  "version": "0.2.3",
+  "version": "0.3.3",
   "publisher": "codesentinel",
   "license": "MIT",
   "icon": "resources/icon.png",
@@ -83,7 +83,7 @@
       },
       {
         "command": "codesentinel.openCodeGraph",
-        "title": "CodeSentinel: Open 360° Interactive Code Graph",
+        "title": "CodeSentinel: Open 360\u00b0 Interactive Code Graph",
         "category": "CodeSentinel"
       },
       {
@@ -109,6 +109,46 @@
       {
         "command": "codesentinel.syncMultiHarnessConfig",
         "title": "CodeSentinel: Sync MCP & Security Skills to AI Harnesses (Claude, Cursor, Copilot, Gemini, Windsurf, Roo, Cline, Kilo, Kiro, Zed, Codex, OpenCode)",
+        "category": "CodeSentinel"
+      },
+      {
+        "command": "codesentinel.toggleOpenCode",
+        "title": "CodeSentinel: Toggle OpenCode Harness (Enable / Disable)",
+        "category": "CodeSentinel"
+      },
+      {
+        "command": "codesentinel.switchActiveRepo",
+        "title": "CodeSentinel: Switch Active Repository Context",
+        "category": "CodeSentinel"
+      },
+      {
+        "command": "codesentinel.syncGitGraph",
+        "title": "CodeSentinel: Git Auto-Sync & Delta Code Graph Sync",
+        "category": "CodeSentinel"
+      },
+      {
+        "command": "codesentinel.openJiraWorkflows",
+        "title": "CodeSentinel: Open Jira Autonomous Workflows",
+        "category": "CodeSentinel"
+      },
+      {
+        "command": "codesentinel.launchClaudeTerminal",
+        "title": "CodeSentinel: Launch Claude Code Agent Terminal",
+        "category": "CodeSentinel"
+      },
+      {
+        "command": "codesentinel.launchAntigravityTerminal",
+        "title": "CodeSentinel: Launch Antigravity / Gemini CLI Terminal",
+        "category": "CodeSentinel"
+      },
+      {
+        "command": "codesentinel.scanGitDiff",
+        "title": "CodeSentinel: Scan Git Diff Only for Security Alerts",
+        "category": "CodeSentinel"
+      },
+      {
+        "command": "codesentinel.runAllTests",
+        "title": "CodeSentinel: Run Multi-Repo Test Matrix (Unit, API, Playwright)",
         "category": "CodeSentinel"
       }
     ],
@@ -166,6 +206,269 @@
           "type": "number",
           "default": 600000,
           "description": "Maximum per-tool execution timeout in milliseconds for OpenCode MCP tools (default: 600000ms / 10 minutes)."
+        },
+        "codesentinel.openCodeEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable or disable OpenCode as the default UI agent harness in CodeSentinel Control Center."
+        },
+        "codesentinel.multiRepoEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable multi-repository support, allowing CodeSentinel to track, scan, and test multiple repositories simultaneously."
+        },
+        "codesentinel.gitAutoSyncEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically detect Git branch changes and delta-sync Atlas Code Graph without re-indexing from scratch."
+        },
+        "codesentinel.defaultAgentHarness": {
+          "type": "string",
+          "enum": [
+            "claude-code",
+            "gemini-antigravity",
+            "opencode",
+            "cursor"
+          ],
+          "default": "claude-code",
+          "description": "Default AI agent harness for ticket workflows and terminal execution (Claude Code, Antigravity / Gemini CLI, OpenCode, Cursor)."
+        },
+        "codesentinel.branchNamingTemplate": {
+          "type": "string",
+          "default": "feature/${ticketKey}-${slug}",
+          "description": "Branch naming template for Jira ticket checkout (tokens: ${ticketKey}, ${slug}, ${issueType})."
+        },
+        "codesentinel.jira.mode": {
+          "type": "string",
+          "enum": [
+            "disabled",
+            "manual",
+            "harness"
+          ],
+          "enumDescriptions": [
+            "No Jira. Start work from a custom task description.",
+            "CodeSentinel calls the Jira REST API itself with the host, email and API token configured below.",
+            "Direct Atlassian connection when you have clicked 'Connect Jira' (browser sign-in); otherwise the agent harness reads and updates tickets headlessly with `claude -p`, which needs an Atlassian MCP server registered locally (`claude mcp add`)."
+          ],
+          "default": "disabled",
+          "description": "How Jira is integrated: disabled, manual (host + email + API token), or harness (the AI agent uses its own Jira connection)."
+        },
+        "codesentinel.jira.harnessAllowedTools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "mcp__claude_ai_Atlassian",
+            "mcp__atlassian",
+            "mcp__jira"
+          ],
+          "description": "Claude Code tool-name prefixes of the Jira/Atlassian MCP server the harness may use in harness mode. Adjust to match the server name shown by `claude mcp list`."
+        },
+        "codesentinel.jira.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Deprecated: use codesentinel.jira.mode.",
+          "deprecationMessage": "Use codesentinel.jira.mode instead (true = manual)."
+        },
+        "codesentinel.jira.host": {
+          "type": "string",
+          "default": "",
+          "description": "Atlassian Jira host URL (e.g. https://company.atlassian.net)."
+        },
+        "codesentinel.jira.email": {
+          "type": "string",
+          "default": "",
+          "description": "Atlassian account email address."
+        },
+        "codesentinel.jira.projectKey": {
+          "type": "string",
+          "default": "",
+          "description": "Default Jira project key (e.g. SEC, PROJ)."
+        },
+        "codesentinel.jira.jqlFilter": {
+          "type": "string",
+          "default": "",
+          "description": "Custom JQL filter for ticket feed."
+        },
+        "codesentinel.testing.playwrightEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable Playwright frontend E2E browser testing in the testing matrix."
+        },
+        "codesentinel.testing.apiTestingEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable stage & API endpoint testing with injected secrets."
+        },
+        "codesentinel.testing.stageDeployMode": {
+          "type": "string",
+          "enum": [
+            "manual",
+            "auto",
+            "disabled"
+          ],
+          "default": "manual",
+          "description": "Stage deployment mode before API testing: manual, auto (run command), or disabled."
+        },
+        "codesentinel.testing.stageDeployCommand": {
+          "type": "string",
+          "default": "npm run deploy:stage",
+          "description": "Shell command to deploy stage environment when stageDeployMode is auto."
+        },
+        "codesentinel.workflow.useWorktrees": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run each ticket in its own git worktree so several tickets/agents can work on one repo in parallel."
+        },
+        "codesentinel.workflow.maxFixIterations": {
+          "type": "number",
+          "default": 3,
+          "description": "Maximum scan \u2192 verify \u2192 fix cycles before the workflow stops and asks for a human."
+        },
+        "codesentinel.workflow.autoPush": {
+          "type": "boolean",
+          "default": false,
+          "description": "Push the feature branch automatically when every gate passes. When false the workflow stops before pushing and waits for approval."
+        },
+        "codesentinel.workflow.requirePlanApproval": {
+          "type": "boolean",
+          "default": false,
+          "description": "Used only when workflow.pauseMode is 'none'. With 'gates' or 'every_stage' the plan always waits for approval."
+        },
+        "codesentinel.workflow.agentTimeoutMinutes": {
+          "type": "number",
+          "default": 30,
+          "description": "Maximum minutes for a single headless agent step."
+        },
+        "codesentinel.workflow.baseBranches": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "main",
+            "develop"
+          ],
+          "description": "Base branches offered when cutting a ticket branch (per-repo config overrides)."
+        },
+        "codesentinel.testing.stageApiBaseUrl": {
+          "type": "string",
+          "default": "http://localhost:3000",
+          "description": "Base URL for stage API testing."
+        },
+        "codesentinel.workflow.pauseMode": {
+          "type": "string",
+          "enum": [
+            "gates",
+            "every_stage",
+            "none"
+          ],
+          "enumDescriptions": [
+            "Pause for plan approval and before pushing (default).",
+            "Also pause after every stage so you can review before the next agent starts.",
+            "No plan approval; still stops before pushing unless auto-push is on."
+          ],
+          "default": "gates",
+          "description": "When ticket workflows stop and wait for you."
+        },
+        "codesentinel.workflow.jiraStageComments": {
+          "type": "boolean",
+          "default": true,
+          "description": "Post a progress comment on the Jira ticket after each stage (plan, development, tests, push) when Jira is enabled."
+        },
+        "codesentinel.agent.model.claude-code": {
+          "type": "string",
+          "default": "sonnet",
+          "description": "Model for Claude Code agent runs: an alias (sonnet, opus, haiku), a full model ID, or empty for the CLI's own default. Defaults to sonnet; opus is never used unless you set it."
+        },
+        "codesentinel.agent.model.gemini-antigravity": {
+          "type": "string",
+          "default": "",
+          "description": "Model passed to `agy --model`. Empty uses Antigravity's own default."
+        },
+        "codesentinel.agent.model.opencode": {
+          "type": "string",
+          "default": "",
+          "description": "Model passed to `opencode run --model` as provider/model (for example anthropic/claude-sonnet-5-5). Empty uses OpenCode's default."
+        },
+        "codesentinel.agent.roleModels": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Optional per-stage model override, keyed by planner, developer, tester, fixer or ticket. Example: {\"planner\": \"opus\", \"developer\": \"sonnet\"}."
+        },
+        "codesentinel.jira.mcpUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Atlassian MCP endpoint used by 'Connect Jira'. Empty uses https://mcp.atlassian.com/v1/mcp."
+        },
+        "codesentinel.agent.effort.claude-code": {
+          "type": "string",
+          "enum": [
+            "",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "enumDescriptions": [
+            "The Claude CLI's own default",
+            "Fastest, cheapest",
+            "Balanced (default)",
+            "More thorough",
+            "Deeper reasoning",
+            "Maximum reasoning (slowest, most expensive)"
+          ],
+          "default": "medium",
+          "description": "Reasoning effort for Claude Code agent runs (--effort)."
+        },
+        "codesentinel.agent.effort.gemini-antigravity": {
+          "type": "string",
+          "enum": [
+            "",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default": "medium",
+          "description": "Reasoning effort for Antigravity (agy) agent runs (--effort)."
+        },
+        "codesentinel.agent.roleEfforts": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          },
+          "description": "Optional per-stage effort override keyed by planner, developer, tester, fixer or ticket. Example: {\"planner\": \"high\", \"developer\": \"medium\"}."
+        },
+        "codesentinel.workflow.stages": {
+          "type": "object",
+          "default": {
+            "plan": true,
+            "develop": true,
+            "diff_scan": true,
+            "verify_test": true,
+            "stage_test": true,
+            "playwright_test": true,
+            "push_branch": true
+          },
+          "additionalProperties": {
+            "type": "boolean"
+          },
+          "description": "Turn individual ticket-workflow stages on or off: plan, develop, diff_scan, verify_test, stage_test, playwright_test, push_branch. A disabled stage is skipped. Missing keys mean enabled."
         }
       }
     }
