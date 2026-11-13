@@ -22,6 +22,8 @@ export interface RunOptions {
  */
 export function run(file: string, args: string[], opts: RunOptions = {}): Promise<RunResult> {
   return new Promise((resolve) => {
+    const isWin = process.platform === "win32";
+    const useShell = isWin && (file.toLowerCase().endsWith(".cmd") || file.toLowerCase().endsWith(".bat"));
     const child = execFile(
       file,
       args,
@@ -31,6 +33,7 @@ export function run(file: string, args: string[], opts: RunOptions = {}): Promis
         timeout: opts.timeoutMs ?? 120000,
         maxBuffer: opts.maxBuffer ?? 32 * 1024 * 1024,
         windowsHide: true,
+        shell: useShell,
       },
       (err: any, stdout, stderr) => {
         const timedOut = Boolean(err && err.killed && err.signal);
@@ -120,7 +123,9 @@ export function runStream(
     let stderr = "";
     let carry = "";
     let timedOut = false;
-    const child = spawn(file, args, { cwd: opts.cwd, env: opts.env ?? process.env, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+    const isWin = process.platform === "win32";
+    const useShell = isWin && (file.toLowerCase().endsWith(".cmd") || file.toLowerCase().endsWith(".bat"));
+    const child = spawn(file, args, { cwd: opts.cwd, env: opts.env ?? process.env, windowsHide: true, shell: useShell, stdio: ["pipe", "pipe", "pipe"] });
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill("SIGTERM");

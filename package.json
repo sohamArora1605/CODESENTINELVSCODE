@@ -384,13 +384,13 @@
         },
         "codesentinel.agent.model.gemini-antigravity": {
           "type": "string",
-          "default": "",
-          "description": "Model passed to `agy --model`. Empty uses Antigravity's own default."
+          "default": "gemini-3.8-flash-high",
+          "description": "Model passed to `agy --model`. Default is gemini-3.8-flash-high."
         },
         "codesentinel.agent.model.opencode": {
           "type": "string",
-          "default": "",
-          "description": "Model passed to `opencode run --model` as provider/model (for example anthropic/claude-sonnet-5-5). Empty uses OpenCode's default."
+          "default": "opencode/big-pickle",
+          "description": "Model passed to `opencode run --model` as provider/model (for example opencode/big-pickle, opencode/glm-5.3-flash-free or anthropic/claude-3-7-sonnet)."
         },
         "codesentinel.agent.roleModels": {
           "type": "object",
@@ -438,6 +438,18 @@
           ],
           "default": "medium",
           "description": "Reasoning effort for Antigravity (agy) agent runs (--effort)."
+        },
+        "codesentinel.agent.effort.opencode": {
+          "type": "string",
+          "enum": [
+            "",
+            "low",
+            "medium",
+            "high",
+            "max"
+          ],
+          "default": "medium",
+          "description": "Reasoning effort passed to `opencode run --variant`."
         },
         "codesentinel.agent.roleEfforts": {
           "type": "object",

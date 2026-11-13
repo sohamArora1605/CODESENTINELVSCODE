@@ -29,6 +29,11 @@
     ["push_branch", "Commit & push"]
   ];
   var EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+  var MODEL_PRESETS = {
+    "claude-code": ["sonnet", "haiku", "opus"],
+    "gemini-antigravity": ["gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low", "claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium"],
+    "opencode": ["opencode/big-pickle", "opencode/glm-5.3-flash-free", "opencode/deepseek-v4.1-flash-free", "opencode/mimo-v2.6-flash-free", "anthropic/claude-3-7-sonnet", "openai/gpt-4o", "google/gemini-2.5-pro"]
+  };
   function effortSelect(attrs, cur, blankLabel) {
     return '<select ' + attrs + '><option value=""' + (!cur ? " selected" : "") + ">" + blankLabel + "</option>" + EFFORTS.map(function (e) {
       return '<option value="' + e + '"' + (cur === e ? " selected" : "") + ">" + e + "</option>";
@@ -66,7 +71,11 @@
   // ------------------------------------------------------------------ views
   function defaultModelFor(h) {
     var m = S.state && S.state.settings["agent.model." + h];
-    return m ? m : "harness default";
+    if (m) return m;
+    if (h === "claude-code") return "sonnet";
+    if (h === "gemini-antigravity") return "gemini-3.8-flash-high";
+    if (h === "opencode") return "opencode/big-pickle";
+    return "harness default";
   }
 
   function jiraMode() { return (S.state && S.state.settings["jira.mode"]) || "disabled"; }
@@ -129,7 +138,10 @@
       '<select class="dv-harness">' + [["claude-code", "Claude Code"], ["gemini-antigravity", "Antigravity"], ["opencode", "OpenCode"]].map(function (o) {
         return '<option value="' + o[0] + '"' + (S.state.settings.defaultAgentHarness === o[0] ? " selected" : "") + ">" + o[1] + "</option>";
       }).join("") + "</select></div>";
-    h += '<div class="dv-row"><label class="dv-field" style="flex:1"><span>Model (blank = settings default)</span><input class="dv-model" placeholder="' + esc(defaultModelFor(S.state.settings.defaultAgentHarness)) + '"></label>' +
+    var defaultH = (S.state && S.state.settings && S.state.settings.defaultAgentHarness) || "claude-code";
+    var dlId = "dv-ml-" + esc(t.key);
+    var presets = (MODEL_PRESETS[defaultH] || []).map(function (m) { return '<option value="' + m + '">'; }).join("");
+    h += '<div class="dv-row"><label class="dv-field" style="flex:1"><span>Model (blank = settings default)</span><input class="dv-model" list="' + dlId + '" placeholder="' + esc(defaultModelFor(defaultH)) + '"><datalist id="' + dlId + '" class="dv-model-list">' + presets + '</datalist></label>' +
       '<label class="dv-field" style="flex:1"><span>Effort</span><select class="dv-effort"><option value="">settings default</option>' + EFFORTS.map(function (e) { return '<option value="' + e + '">' + e + "</option>"; }).join("") + "</select></label>" +
       '<label class="dv-field" style="flex:1"><span>Pause</span><select class="dv-pause">' + [["gates", "Plan + before push"], ["every_stage", "After every stage"], ["none", "Only before push"]].map(function (o) {
         return '<option value="' + o[0] + '"' + ((S.state.settings["workflow.pauseMode"] || "gates") === o[0] ? " selected" : "") + ">" + o[1] + "</option>";
@@ -292,18 +304,54 @@
     var rm = s["agent.roleModels"] || {};
     var CLAUDE_PRESETS = [["sonnet", "Sonnet (default)"], ["haiku", "Haiku (fastest, cheapest)"], ["opus", "Opus (most capable, most expensive)"], ["", "CLI default"]];
     var cm = s["agent.model.claude-code"] || "";
-    var known = CLAUDE_PRESETS.some(function (o) { return o[0] === cm; });
-    h += '<div class="dv-card"><div class="dv-card-h"><b>AI models</b></div><div class="dv-muted">Used by the autonomous agents. CodeSentinel never picks Opus unless you do.</div>' +
+    var knownClaude = CLAUDE_PRESETS.some(function (o) { return o[0] === cm; });
+
+    var AGY_PRESETS = [
+      ["gemini-3.8-flash-high", "Gemini 3.8 Flash High (default)"],
+      ["gemini-3.8-flash-medium", "Gemini 3.8 Flash Medium"],
+      ["gemini-3.8-flash-low", "Gemini 3.8 Flash Low"],
+      ["claude-sonnet-4-6", "Claude Sonnet 4.6 Thinking"],
+      ["claude-opus-4-6-thinking", "Claude Opus 4.6 Thinking"],
+      ["gpt-oss-120b-medium", "GPT-OSS 120B Medium"],
+      ["", "CLI default"]
+    ];
+    var am = s["agent.model.gemini-antigravity"] || "";
+    var knownAgy = AGY_PRESETS.some(function (o) { return o[0] === am; });
+
+    var OPENCODE_PRESETS = [
+      ["opencode/big-pickle", "Big Pickle (Free - default)"],
+      ["opencode/glm-5.3-flash-free", "GLM 5.3 Flash (Free)"],
+      ["opencode/deepseek-v4.1-flash-free", "DeepSeek v4.1 Flash (Free)"],
+      ["opencode/mimo-v2.6-flash-free", "Mimo v2.6 Flash (Free)"],
+      ["opencode/nemotron-3.5-super-vl-free", "Nemotron 3.5 Super VL (Free)"],
+      ["anthropic/claude-3-7-sonnet", "Claude 3.7 Sonnet (Anthropic)"],
+      ["openai/gpt-4o", "GPT-4o (OpenAI)"],
+      ["google/gemini-2.5-pro", "Gemini 2.5 Pro (Google)"],
+      ["", "CLI default"]
+    ];
+    var om = s["agent.model.opencode"] || "";
+    var knownOpencode = OPENCODE_PRESETS.some(function (o) { return o[0] === om; });
+
+    h += '<div class="dv-card"><div class="dv-card-h"><b>AI models</b></div><div class="dv-muted">Used by the autonomous agents across all harnesses.</div>' +
       '<label class="dv-field"><span>Claude Code model</span><select data-setting="agent.model.claude-code">' + CLAUDE_PRESETS.map(function (o) {
         return '<option value="' + o[0] + '"' + (cm === o[0] ? " selected" : "") + ">" + o[1] + "</option>";
-      }).join("") + (known ? "" : '<option value="' + esc(cm) + '" selected>' + esc(cm) + " (custom)</option>") + "</select></label>" +
-      '<label class="dv-field"><span>…or a specific Claude model ID</span><input data-setting="agent.model.claude-code" placeholder="e.g. claude-sonnet-5-5" value="' + (known ? "" : esc(cm)) + '"></label>' +
-      '<label class="dv-field"><span>Antigravity (agy) model</span><input data-setting="agent.model.gemini-antigravity" placeholder="blank = Antigravity default" value="' + esc(s["agent.model.gemini-antigravity"] || "") + '"></label>' +
-      '<label class="dv-field"><span>OpenCode model (provider/model)</span><input data-setting="agent.model.opencode" placeholder="e.g. anthropic/claude-sonnet-5-5" value="' + esc(s["agent.model.opencode"] || "") + '"></label>' +
-      '<div class="dv-label">Reasoning effort <em>(higher = slower and more expensive)</em></div>' +
+      }).join("") + (knownClaude ? "" : '<option value="' + esc(cm) + '" selected>' + esc(cm) + " (custom)</option>") + "</select></label>" +
+      '<label class="dv-field"><span>…or a specific Claude model ID</span><input data-setting="agent.model.claude-code" placeholder="e.g. claude-sonnet-5-5" value="' + (knownClaude ? "" : esc(cm)) + '"></label>' +
+
+      '<label class="dv-field"><span>Antigravity (agy) model</span><select data-setting="agent.model.gemini-antigravity">' + AGY_PRESETS.map(function (o) {
+        return '<option value="' + o[0] + '"' + (am === o[0] ? " selected" : "") + ">" + o[1] + "</option>";
+      }).join("") + (knownAgy ? "" : '<option value="' + esc(am) + '" selected>' + esc(am) + " (custom)</option>") + "</select></label>" +
+      '<label class="dv-field"><span>…or a specific Antigravity model ID</span><input data-setting="agent.model.gemini-antigravity" placeholder="e.g. gemini-3.8-flash-high" value="' + (knownAgy ? "" : esc(am)) + '"></label>' +
+
+      '<label class="dv-field"><span>OpenCode model</span><select data-setting="agent.model.opencode">' + OPENCODE_PRESETS.map(function (o) {
+        return '<option value="' + o[0] + '"' + (om === o[0] ? " selected" : "") + ">" + o[1] + "</option>";
+      }).join("") + (knownOpencode ? "" : '<option value="' + esc(om) + '" selected>' + esc(om) + " (custom)</option>") + "</select></label>" +
+      '<label class="dv-field"><span>…or a specific OpenCode model ID</span><input data-setting="agent.model.opencode" placeholder="e.g. anthropic/claude-3-7-sonnet" value="' + (knownOpencode ? "" : esc(om)) + '"></label>' +
+
+      '<div class="dv-label">Reasoning effort <em>(higher = slower and more thorough)</em></div>' +
       '<label class="dv-field"><span>Claude Code effort</span>' + effortSelect('data-setting="agent.effort.claude-code"', s["agent.effort.claude-code"], "CLI default") + "</label>" +
       '<label class="dv-field"><span>Antigravity (agy) effort</span>' + effortSelect('data-setting="agent.effort.gemini-antigravity"', s["agent.effort.gemini-antigravity"], "CLI default") + "</label>" +
-      '<div class="dv-muted">OpenCode has no effort flag, so it is not offered.</div>' +
+      '<label class="dv-field"><span>OpenCode effort (variant)</span>' + effortSelect('data-setting="agent.effort.opencode"', s["agent.effort.opencode"], "CLI default") + "</label>" +
       '<div class="dv-label">Per-stage override <em>(optional; applies to the harness above)</em></div>' +
       ["planner", "developer", "tester", "fixer"].map(function (r) {
         return '<label class="dv-field"><span>' + r + '</span><div class="dv-row" style="margin:0"><input data-rolemodel="' + r + '" placeholder="model: same as above" value="' + esc(rm[r] || "") + '">' +
@@ -467,6 +515,16 @@
       post("checkout", { repoPath: t.dataset.repo, branch: t.value });
     } else if (t.dataset.filter) {
       S.filter[t.dataset.filter] = t.value; if (t.dataset.filter === "status") pullTickets();
+    } else if (t.classList && t.classList.contains("dv-harness")) {
+      var f = t.closest(".dv-form");
+      if (f) {
+        var mi = f.querySelector(".dv-model");
+        if (mi) mi.placeholder = defaultModelFor(t.value);
+        var dl = f.querySelector(".dv-model-list");
+        if (dl) {
+          dl.innerHTML = (MODEL_PRESETS[t.value] || []).map(function (m) { return '<option value="' + m + '">'; }).join("");
+        }
+      }
     }
   });
   root.addEventListener("keydown", function (e) {

@@ -17,7 +17,7 @@ export const SETTING_KEYS = [
   "testing.stageApiBaseUrl", "workflow.useWorktrees", "workflow.maxFixIterations", "workflow.autoPush",
   "workflow.requirePlanApproval", "workflow.agentTimeoutMinutes", "workflow.baseBranches",
   "workflow.pauseMode", "workflow.jiraStageComments", "workflow.stages", "agent.model.claude-code", "agent.model.gemini-antigravity", "agent.model.opencode", "agent.roleModels",
-  "agent.effort.claude-code", "agent.effort.gemini-antigravity", "agent.roleEfforts",
+  "agent.effort.claude-code", "agent.effort.gemini-antigravity", "agent.effort.opencode", "agent.roleEfforts",
 ];
 
 function snapshotPath(): string {

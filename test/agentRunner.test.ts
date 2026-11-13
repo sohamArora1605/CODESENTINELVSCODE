@@ -1,7 +1,7 @@
 import * as assert from "assert";
 import * as fs from "fs";
 import * as path from "path";
-import { buildHeadlessCommand, resolveModel, isValidModel, parseClaudeStreamLine, CliAgentExecutor, resolveEffort, isValidEffort } from "../src/agent/agentRunner";
+import { buildHeadlessCommand, resolveModel, isValidModel, parseClaudeStreamLine, parseAgyStreamLine, parseOpencodeStreamLine, CliAgentExecutor, resolveEffort, isValidEffort } from "../src/agent/agentRunner";
 import { setSettingsOverrides } from "../src/config/settings";
 import { tmpDir } from "./helpers";
 
@@ -11,7 +11,8 @@ export async function testAgentRunner(): Promise<void> {
 
   // ---- model resolution: never opus unless asked; override > role > harness > default
   assert.strictEqual(resolveModel("claude-code", "developer"), "sonnet", "default must be sonnet, not opus");
-  assert.strictEqual(resolveModel("gemini-antigravity", "developer"), undefined, "agy: harness default when unset");
+  assert.strictEqual(resolveModel("gemini-antigravity", "developer"), "gemini-3.8-flash-high", "agy: default to gemini-3.8-flash-high");
+  assert.strictEqual(resolveModel("opencode", "developer"), "opencode/big-pickle", "opencode: default to big-pickle");
   setSettingsOverrides({ "agent.model.claude-code": "haiku", "agent.roleModels": { planner: "opus" }, "agent.model.opencode": "anthropic/claude-sonnet-5-5" });
   assert.strictEqual(resolveModel("claude-code", "developer"), "haiku");
   assert.strictEqual(resolveModel("claude-code", "planner"), "opus", "explicit per-stage choice is honored");
@@ -22,10 +23,10 @@ export async function testAgentRunner(): Promise<void> {
   assert.ok(isValidModel("claude-sonnet-5-5") && isValidModel("anthropic/claude-sonnet-5-5") && !isValidModel("a b") && !isValidModel("-x") && !isValidModel("x;rm"));
   setSettingsOverrides({});
 
-  // ---- effort resolution: override > per-stage > per-harness > default; only claude / agy have the flag
+  // ---- effort resolution: override > per-stage > per-harness > default; claude, agy, opencode all support effort
   assert.strictEqual(resolveEffort("claude-code", "developer"), "medium");
   assert.strictEqual(resolveEffort("gemini-antigravity", "developer"), "medium");
-  assert.strictEqual(resolveEffort("opencode", "developer"), undefined, "opencode has no --effort flag");
+  assert.strictEqual(resolveEffort("opencode", "developer"), "medium", "opencode supports effort via variant");
   setSettingsOverrides({ "agent.effort.claude-code": "low", "agent.roleEfforts": { planner: "high" } });
   assert.strictEqual(resolveEffort("claude-code", "developer"), "low");
   assert.strictEqual(resolveEffort("claude-code", "planner"), "high");
@@ -44,14 +45,16 @@ export async function testAgentRunner(): Promise<void> {
   assert.ok(!buildHeadlessCommand("claude-code", "planner", "p", "sonnet")!.args.includes("Edit"), "planner is read-only");
   assert.ok(buildHeadlessCommand("claude-code", "ticket", "p")!.args.includes("ToolSearch"));
   assert.ok(!buildHeadlessCommand("claude-code", "developer", "p")!.args.includes("--model"), "no --model flag when none resolved");
-  assert.deepStrictEqual(buildHeadlessCommand("gemini-antigravity", "planner", "P", "gem-x")!.args, ["-p", "P", "--model", "gem-x", "--mode", "plan"]);
-  assert.deepStrictEqual(buildHeadlessCommand("gemini-antigravity", "planner", "P", "gem-x", "high")!.args, ["-p", "P", "--model", "gem-x", "--effort", "high", "--mode", "plan"]);
+  assert.deepStrictEqual(buildHeadlessCommand("gemini-antigravity", "planner", "P", "gem-x")!.args, ["-p", "P", "--output-format", "stream-json", "--model", "gem-x", "--mode", "plan"]);
+  assert.deepStrictEqual(buildHeadlessCommand("gemini-antigravity", "planner", "P", "gem-x", "high")!.args, ["-p", "P", "--output-format", "stream-json", "--model", "gem-x", "--effort", "high", "--mode", "plan"]);
+  assert.ok(buildHeadlessCommand("gemini-antigravity", "developer", "P", "gem-x")!.args.includes("--dangerously-skip-permissions"));
   const withEffort = buildHeadlessCommand("claude-code", "developer", "p", "sonnet", "high")!.args;
   assert.deepStrictEqual(withEffort.slice(withEffort.indexOf("--model"), withEffort.indexOf("--model") + 4), ["--model", "sonnet", "--effort", "high"]);
   assert.ok(!buildHeadlessCommand("claude-code", "developer", "p", "sonnet")!.args.includes("--effort"), "no --effort when none resolved");
   assert.ok(!buildHeadlessCommand("opencode", "developer", "p", undefined, "high")!.args.includes("--effort"));
+  assert.ok(buildHeadlessCommand("opencode", "developer", "p", undefined, "high")!.args.includes("--variant"));
   assert.ok(!buildHeadlessCommand("claude-code", "developer", "p", "sonnet", "turbo")!.args.includes("--effort"), "invalid effort never reaches the CLI");
-  assert.deepStrictEqual(buildHeadlessCommand("opencode", "developer", "P", "anthropic/x")!.args, ["run", "--model", "anthropic/x", "P"]);
+  assert.deepStrictEqual(buildHeadlessCommand("opencode", "developer", "P", "anthropic/x")!.args, ["run", "--model", "anthropic/x", "--auto", "--format", "json", "P"]);
   assert.strictEqual(buildHeadlessCommand("cursor", "developer", "P"), null);
   assert.ok(!buildHeadlessCommand("claude-code", "developer", "p", "bad model")!.args.includes("--model"), "invalid model never reaches the CLI");
 
@@ -63,6 +66,17 @@ export async function testAgentRunner(): Promise<void> {
   assert.strictEqual(parseClaudeStreamLine('{"type":"result","subtype":"error_max_turns","is_error":true,"result":""}')!.result!.isError, true);
   assert.strictEqual(parseClaudeStreamLine("not json"), null);
   assert.strictEqual(parseClaudeStreamLine('{"type":"rate_limit_event"}'), null);
+
+  // ---- agy stream parsing
+  assert.deepStrictEqual(parseAgyStreamLine('{"event":"init"}'), { activity: "started (agy session)" });
+  assert.strictEqual(parseAgyStreamLine('{"event":"step_update","step_update":{"step_type":"tool","state":"ACTIVE","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"npm test"}}}}')!.activity, "run_command npm test");
+  assert.strictEqual(parseAgyStreamLine('{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"Updating security config"}}')!.activity, "says: Updating security config");
+  assert.deepStrictEqual(parseAgyStreamLine('{"event":"result","result":{"status":"SUCCESS","response":"All tasks completed successfully"}}')!.result, { text: "All tasks completed successfully", isError: false });
+
+  // ---- opencode stream parsing
+  assert.deepStrictEqual(parseOpencodeStreamLine('{"type":"step_start"}'), { activity: "started (opencode)" });
+  assert.strictEqual(parseOpencodeStreamLine('{"type":"tool_call","part":{"type":"tool","tool":"edit_file","input":{"path":"src/index.ts"}}}')!.activity, "edit_file src/index.ts");
+  assert.strictEqual(parseOpencodeStreamLine('{"type":"text","part":{"type":"text","text":"Refactoring done"}}')!.activity, "says: Refactoring done");
 
   // ---- end to end through a fake `claude` binary: args, stdin, streamed activity, final result, reported model
   const bin = tmpDir("cs-fakebin-");
@@ -89,6 +103,36 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"all done"}
   assert.ok(args.includes("--effort") && args[args.indexOf("--effort") + 1] === "medium", "default effort passed through");
   assert.strictEqual(res.effort, "medium");
   assert.strictEqual(fs.readFileSync(stdinFile, "utf-8"), "do it \"$(whoami)\" `id`", "prompt goes via stdin, never through a shell");
+
+  // ---- end to end through fake `agy` binary
+  fs.writeFileSync(path.join(bin, "agy"), `#!/bin/sh
+echo '{"event":"init"}'
+echo '{"event":"step_update","step_update":{"step_type":"tool","state":"ACTIVE","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"npm test"}}}}'
+echo '{"event":"result","result":{"status":"SUCCESS","response":"agy finished ok"}}'
+`, { mode: 0o755 });
+  const agySeen: string[] = [];
+  const agyRes = await new CliAgentExecutor().run({
+    role: "developer", harness: "gemini-antigravity", cwd: bin, prompt: "test agy", onActivity: (l) => agySeen.push(l),
+    env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}` },
+  });
+  assert.ok(agyRes.success, agyRes.output);
+  assert.strictEqual(agyRes.output, "agy finished ok");
+  assert.deepStrictEqual(agySeen, ["started (agy session)", "run_command npm test"]);
+
+  // ---- end to end through fake `opencode` binary
+  fs.writeFileSync(path.join(bin, "opencode"), `#!/bin/sh
+echo '{"type":"step_start"}'
+echo '{"type":"tool_call","part":{"type":"tool","tool":"write_file","input":{"file":"out.txt"}}}'
+echo '{"type":"text","part":{"type":"text","text":"opencode done"}}'
+`, { mode: 0o755 });
+  const ocSeen: string[] = [];
+  const ocRes = await new CliAgentExecutor().run({
+    role: "developer", harness: "opencode", cwd: bin, prompt: "test opencode", onActivity: (l) => ocSeen.push(l),
+    env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}` },
+  });
+  assert.ok(ocRes.success, ocRes.output);
+  assert.strictEqual(ocRes.output, "opencode done");
+  assert.deepStrictEqual(ocSeen, ["started (opencode)", "write_file out.txt", "says: opencode done"]);
 
   // a missing CLI is reported, not thrown
   const nope = await new CliAgentExecutor().run({ role: "planner", harness: "claude-code", cwd: bin, prompt: "x", env: { ...process.env, PATH: "/nonexistent" } });

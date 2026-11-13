@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as crypto from "crypto";
 import { shQuote } from "../util/proc";
-import { AgentHarnessType } from "./agentRunner";
+import { AgentHarnessType, resolveModel, resolveEffort, getAugmentedEnv } from "./agentRunner";
 import { getSetting } from "../config/settings";
 
 export { AgentHarnessType };
@@ -20,19 +20,22 @@ function getVscode(): any {
 export function buildInteractiveCommand(
   harness: AgentHarnessType,
   promptFile: string | null,
-  platform: NodeJS.Platform = process.platform
+  platform: NodeJS.Platform = process.platform,
+  opts?: { model?: string; effort?: string }
 ): string {
   const win = platform === "win32";
   const arg = promptFile ? (win ? ` (Get-Content -Raw -LiteralPath '${promptFile.replace(/'/g, "''")}')` : ` "$(cat ${shQuote(promptFile)})"`) : "";
+  const m = opts?.model ? `--model ${opts.model} ` : "";
+  const e = opts?.effort ? (harness === "opencode" ? `--variant ${opts.effort} ` : `--effort ${opts.effort} `) : "";
   switch (harness) {
-    case "claude-code": return `claude${arg}`;
+    case "claude-code": return `claude ${m}${e}${arg}`.trim();
     case "gemini-antigravity":
       return promptFile
-        ? (win ? `agy -i (Get-Content -Raw -LiteralPath '${promptFile.replace(/'/g, "''")}')` : `agy -i "$(cat ${shQuote(promptFile)})"`)
-        : "agy";
-    case "cursor": return `cursor-agent${arg}`;
+        ? (win ? `agy ${m}${e}-i (Get-Content -Raw -LiteralPath '${promptFile.replace(/'/g, "''")}')` : `agy ${m}${e}-i "$(cat ${shQuote(promptFile)})"`.trim())
+        : `agy ${m}${e}`.trim();
+    case "cursor": return `cursor-agent ${m}${arg}`.trim();
     case "opencode":
-    default: return promptFile ? `opencode --prompt${arg}` : "opencode";
+    default: return promptFile ? `opencode ${m}${e}--prompt${arg}`.trim() : `opencode ${m}${e}`.trim();
   }
 }
 
@@ -76,12 +79,16 @@ export class AgentTerminalLauncher {
     workspaceRoot: string,
     harness: AgentHarnessType = this.getDefaultHarness(),
     customPrompt?: string,
-    ticket?: { key: string; summary: string; branch: string; description?: string; plan?: string }
+    ticket?: { key: string; summary: string; branch: string; description?: string; plan?: string },
+    envExtra?: Record<string, string>,
+    opts?: { model?: string; effort?: string }
   ): any {
     const vscode = getVscode();
     const repoName = path.basename(workspaceRoot);
     const prompt = customPrompt || (ticket ? buildTicketPrompt(ticket) : "");
-    const cmd = buildInteractiveCommand(harness, prompt ? writePromptFile(prompt) : null);
+    const model = resolveModel(harness, "developer", opts?.model);
+    const effort = resolveEffort(harness, "developer", opts?.effort);
+    const cmd = buildInteractiveCommand(harness, prompt ? writePromptFile(prompt) : null, process.platform, { model, effort });
     // One terminal per (harness, repo, ticket) so tickets can run side by side.
     const name = `${this.label(harness)} [${repoName}${ticket ? ` · ${ticket.key}` : ""}]`;
 
@@ -91,27 +98,13 @@ export class AgentTerminalLauncher {
       existing.sendText(cmd);
       return existing;
     }
-    const env: Record<string, string> = {
+    const baseEnv: Record<string, string> = {
       CODESENTINEL_WORKSPACE: workspaceRoot,
       CODESENTINEL_TICKET: ticket?.key || "",
       CODESENTINEL_BRANCH: ticket?.branch || "",
+      ...(envExtra || {}),
     };
-    try {
-      const { DependencyManager } = require("../services/dependencyManager");
-      const e = DependencyManager.getInstance().getEnvWithBinPath();
-      if (e.PATH) env.PATH = e.PATH;
-    } catch {}
-    const extraDirs = [
-      path.join(os.homedir(), ".local", "bin"),
-      path.join(os.homedir(), ".codesentinel", "bin"),
-      "/opt/homebrew/bin",
-      "/opt/homebrew/sbin",
-      "/usr/local/bin",
-    ];
-    const pathKey = process.platform === "win32" ? "Path" : "PATH";
-    const currentPath = env[pathKey] || process.env[pathKey] || process.env.PATH || "";
-    env[pathKey] = extraDirs.filter((p) => fs.existsSync(p)).concat(currentPath ? [currentPath] : []).join(path.delimiter);
-    env.PATH = env[pathKey];
+    const env = getAugmentedEnv(baseEnv) as Record<string, string>;
     const terminal = vscode.window.createTerminal({ name, cwd: workspaceRoot, env });
     terminal.show();
     terminal.sendText(cmd);

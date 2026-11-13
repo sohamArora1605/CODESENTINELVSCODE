@@ -53,7 +53,7 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   const opencodeLauncher = OpenCodeLauncher.getInstance();
-  const mcpServer = new CodeSentinelMcpServer("codesentinel-internal", "0.3.3");
+  const mcpServer = new CodeSentinelMcpServer("codesentinel-internal", "0.3.4");
   mcpServer.setWorkspaceContextResolver(() => workspaceManager.getContext());
 
   // Register Webview View Provider for Activity Bar Sidebar

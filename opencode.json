@@ -5,21 +5,21 @@
       "type": "local",
       "command": [
         "node",
-        "/Users/sohamarora/.vscode/extensions/codesentinel.codesentinel-0.3.3/dist/mcp-server.js"
+        "/Users/sohamarora/.vscode/extensions/codesentinel.codesentinel-0.3.4/dist/mcp-server.js"
       ],
       "enabled": true,
       "timeout": 600000,
       "environment": {
         "CODESENTINEL_WORKSPACE": "/Users/sohamarora/untitled folder/CODESENTINELVSCODE",
         "CODESENTINEL_STORAGE_PATH": "/Users/sohamarora/Library/Application Support/Code/User/globalStorage/codesentinel.codesentinel",
-        "CODESENTINEL_EXTENSION_PATH": "/Users/sohamarora/.vscode/extensions/codesentinel.codesentinel-0.3.3"
+        "CODESENTINEL_EXTENSION_PATH": "/Users/sohamarora/.vscode/extensions/codesentinel.codesentinel-0.3.4"
       }
     },
     "atlas": {
       "type": "local",
       "command": [
         "node",
-        "/Users/sohamarora/.vscode/extensions/codesentinel.codesentinel-0.3.3/dist/atlas-bridge.js",
+        "/Users/sohamarora/.vscode/extensions/codesentinel.codesentinel-0.3.4/dist/atlas-bridge.js",
         "local",
         "/Users/sohamarora/untitled folder/CODESENTINELVSCODE"
       ],
@@ -28,7 +28,7 @@
       "environment": {
         "CODESENTINEL_WORKSPACE": "/Users/sohamarora/untitled folder/CODESENTINELVSCODE",
         "CODESENTINEL_STORAGE_PATH": "/Users/sohamarora/Library/Application Support/Code/User/globalStorage/codesentinel.codesentinel",
-        "CODESENTINEL_EXTENSION_PATH": "/Users/sohamarora/.vscode/extensions/codesentinel.codesentinel-0.3.3"
+        "CODESENTINEL_EXTENSION_PATH": "/Users/sohamarora/.vscode/extensions/codesentinel.codesentinel-0.3.4"
       }
     }
   }

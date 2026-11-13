@@ -25,8 +25,8 @@ const SETTING_DEFAULTS: Record<string, unknown> = {
   "testing.stageDeployMode": "manual", "testing.stageDeployCommand": "", "testing.stageApiBaseUrl": "",
   "workflow.useWorktrees": true, "workflow.maxFixIterations": 3, "workflow.autoPush": false,
   "workflow.requirePlanApproval": false, "workflow.agentTimeoutMinutes": 30, "workflow.pauseMode": "gates", "workflow.jiraStageComments": true,
-  "agent.model.claude-code": "sonnet", "agent.model.gemini-antigravity": "", "agent.model.opencode": "", "agent.roleModels": {}, "workflow.stages": {},
-  "agent.effort.claude-code": "medium", "agent.effort.gemini-antigravity": "medium", "agent.roleEfforts": {}, "workflow.baseBranches": ["main", "develop"],
+  "agent.model.claude-code": "sonnet", "agent.model.gemini-antigravity": "gemini-3.8-flash-high", "agent.model.opencode": "opencode/big-pickle", "agent.roleModels": {}, "workflow.stages": {},
+  "agent.effort.claude-code": "medium", "agent.effort.gemini-antigravity": "medium", "agent.effort.opencode": "medium", "agent.roleEfforts": {}, "workflow.baseBranches": ["main", "develop"],
 };
 
 /** Host side of the Developer tab: validates every message from the webview and pushes state back. */
@@ -287,9 +287,20 @@ export class DevPanelController {
         if (!repo || !TICKET_RE.test(String(msg.ticketKey))) throw new Error("Unknown workflow.");
         const wf = WorkflowEngine.getInstance().getWorkflow(msg.ticketKey, repo);
         if (!wf) throw new Error("Unknown workflow.");
-        AgentTerminalLauncher.getInstance().launchAgentTerminal(wf.workDir, undefined, undefined, {
-          key: wf.ticketKey, summary: wf.ticketSummary || "", branch: wf.targetBranch, plan: wf.plan,
-        });
+        const harness = (wf.harness as AgentHarnessType | undefined) ?? getSetting<AgentHarnessType>("defaultAgentHarness", "claude-code");
+        AgentTerminalLauncher.getInstance().launchAgentTerminal(
+          wf.workDir,
+          harness,
+          undefined,
+          {
+            key: wf.ticketKey, summary: wf.ticketSummary || "", branch: wf.targetBranch, plan: wf.plan,
+          },
+          undefined,
+          {
+            model: wf.currentAgent?.model,
+            effort: wf.currentAgent?.effort,
+          }
+        );
         return;
       }
 
@@ -436,7 +447,17 @@ export class DevPanelController {
           if (!r.success) { this.toast(`${path.basename(repo)}: ${r.message}`, "bad"); continue; }
         }
         void jira.updateTicketStatus(key, "In Progress", `CodeSentinel: started on branch ${branch}.`);
-        AgentTerminalLauncher.getInstance().launchAgentTerminal(dir, harness, undefined, { key, summary: ticket.summary, branch, description: ticket.description });
+        AgentTerminalLauncher.getInstance().launchAgentTerminal(
+          dir,
+          harness,
+          undefined,
+          { key, summary: ticket.summary, branch, description: ticket.description },
+          undefined,
+          {
+            model: typeof msg.model === "string" && msg.model.trim() && isValidModel(msg.model.trim()) ? msg.model.trim() : undefined,
+            effort: typeof msg.effort === "string" && isValidEffort(msg.effort.trim().toLowerCase()) ? msg.effort.trim().toLowerCase() : undefined,
+          }
+        );
         this.toast(`${path.basename(repo)}: ${harness} terminal opened on ${branch}.`, "ok");
       } else {
         try {
