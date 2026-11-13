@@ -323,6 +323,29 @@ export class DevPanelController {
         return;
       }
 
+      case "dev:sendStageChat": {
+        const repo = this.knownRepo(msg.repoPath);
+        if (!repo || !TICKET_RE.test(String(msg.ticketKey))) throw new Error("Unknown workflow.");
+        const text = String(msg.message || "").trim();
+        if (!text) return;
+        const stepId = String(msg.stepId || "");
+        const engine = WorkflowEngine.getInstance();
+        const { wf, step } = engine.addStageChat(msg.ticketKey, repo, stepId, text);
+        AgentTerminalLauncher.getInstance().sendToStageAgentTerminal(wf, stepId, text);
+        this.toast(`Chat sent to ${step ? step.name : "stage"} agent terminal.`, "ok");
+        return this.pushState();
+      }
+
+      case "dev:openStageTerminal": {
+        const repo = this.knownRepo(msg.repoPath);
+        if (!repo || !TICKET_RE.test(String(msg.ticketKey))) throw new Error("Unknown workflow.");
+        const stepId = String(msg.stepId || "");
+        const wf = WorkflowEngine.getInstance().getWorkflow(msg.ticketKey, repo);
+        if (!wf) throw new Error("Unknown workflow.");
+        AgentTerminalLauncher.getInstance().sendToStageAgentTerminal(wf, stepId, "Let's inspect and continue this stage.");
+        return;
+      }
+
       case "dev:addRepo": {
         const pick = await vscode.window.showOpenDialog({ canSelectFolders: true, canSelectFiles: false, canSelectMany: false, openLabel: "Add repository" });
         if (!pick?.[0]) return;

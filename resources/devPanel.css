@@ -74,7 +74,10 @@
 .dv-btn.dv-danger, .dv-btn.dv-btn-danger { border-color: rgba(248,113,113,.5); color: #f87171; background: rgba(248,113,113,.08); }
 .dv-btn.dv-danger:hover, .dv-btn.dv-btn-danger:hover { background: rgba(248,113,113,.22); color: #fff; }
 .dv-btn-xs { padding: 2px 7px; font-size: 10px; line-height: 1.25; border-radius: 4px; }
-.dv-force-quit-btn { margin-left: auto; font-weight: 700; display: inline-flex; align-items: center; gap: 4px; }
+.dv-card-h-top { display: flex; align-items: center; justify-content: space-between; width: 100%; gap: 8px; }
+.dv-card-h-left { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.dv-card-h-right { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.dv-force-quit-btn { font-weight: 700; white-space: nowrap; }
 .dv-card-branch { flex-basis: 100%; margin-top: 2px; }
 .dv-stages { margin: 4px 0; } .dv-stages summary { cursor: pointer; color: var(--text-muted); font-size: 11px; margin-bottom: 4px; }
 
@@ -107,3 +110,101 @@
 .dv-terminal-title { font-family: var(--vscode-editor-font-family, monospace); font-weight: 600; color: #94a3b8; font-size: 10.5px; margin: 0 6px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dv-terminal-ctrls { display: flex; gap: 6px; align-items: center; }
 .dv-terminal-box .dv-pre { margin: 0; border-radius: 0; background: transparent; max-height: 220px; font-size: 10.5px; color: #e2e8f0; line-height: 1.45; }
+
+/* Stage Chat Panel */
+.dv-stage-chat-panel {
+  margin: 6px 0 8px;
+  padding: 8px 10px;
+  background: rgba(15, 23, 42, 0.75);
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  border-left: 3px solid var(--accent-blue);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.dv-stage-chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-main);
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.dv-stage-chat-msgs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 160px;
+  overflow-y: auto;
+  padding: 2px 0;
+}
+.dv-chat-msg {
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 4px 8px;
+  border-radius: 4px;
+  word-break: break-word;
+}
+.dv-chat-msg.dv-chat-user {
+  background: rgba(56, 189, 248, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.2);
+  color: #e0f2fe;
+}
+.dv-chat-msg.dv-chat-agent {
+  background: rgba(168, 85, 247, 0.12);
+  border: 1px solid rgba(168, 85, 247, 0.2);
+  color: #f3e8ff;
+}
+.dv-chat-msg.dv-chat-system {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-muted);
+  font-style: italic;
+}
+.dv-chat-sender {
+  font-weight: 700;
+  margin-right: 4px;
+}
+.dv-chat-empty {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  padding: 4px 0;
+  line-height: 1.4;
+}
+.dv-stage-chat-bar {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-top: 2px;
+}
+.dv-stage-chat-input {
+  flex: 1;
+  background: rgba(0, 0, 0, 0.4);
+  color: var(--text-main);
+  border: 1px solid var(--card-border);
+  border-radius: 5px;
+  padding: 5px 8px;
+  font-size: 11px;
+  font-family: inherit;
+  min-width: 0;
+}
+.dv-stage-chat-input:focus {
+  outline: 1px solid var(--accent-blue);
+  border-color: var(--accent-blue);
+}
+.dv-stage-chat-toggle {
+  margin-left: 8px;
+  font-size: 10.5px;
+  color: var(--accent-blue);
+  cursor: pointer;
+}
+.dv-chat-highlight-btn {
+  background: rgba(56, 189, 248, 0.15) !important;
+  border-color: rgba(56, 189, 248, 0.4) !important;
+  color: #38bdf8 !important;
+}
+.dv-chat-highlight-btn:hover {
+  background: rgba(56, 189, 248, 0.25) !important;
+  color: #fff !important;
+}

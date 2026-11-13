@@ -450,6 +450,29 @@ export class WorkflowEngine {
     return true;
   }
 
+  /**
+   * Records a developer chat message for a specific workflow stage, saves it to the workflow's
+   * chat history and guidance, logs the activity, and notifies subscribers.
+   */
+  public addStageChat(ticketKey: string, repoPath: string, stepId: string, message: string): { wf: TicketWorkflow; step?: WorkflowStepState } {
+    const wf = this.getWorkflow(ticketKey, repoPath);
+    if (!wf) throw new Error(`No workflow for ${ticketKey} in ${repoPath}.`);
+    const step = wf.steps.find((s) => s.id === stepId);
+    wf.stageChats = wf.stageChats || {};
+    wf.stageChats[stepId] = wf.stageChats[stepId] || [];
+    wf.stageChats[stepId].push({ sender: "user", text: message, timestamp: Date.now() });
+    wf.stageGuidance = wf.stageGuidance || {};
+    wf.stageGuidance[stepId] = message;
+
+    const stepName = step ? step.name : stepId;
+    wf.activity = wf.activity || [];
+    wf.activity.push(`[chat:${stepId}] 👤 Developer to ${stepName}: ${message}`);
+    this.log(wf, `[Chat] Developer to ${stepName}: ${message}`);
+
+    this.notify(wf);
+    return { wf, step };
+  }
+
   // ------------------------------------------------------------------ orchestration
   private async execute(wf: TicketWorkflow, ticket: JiraTicket): Promise<TicketWorkflow> {
     this.running.add(wf.id);
@@ -554,8 +577,13 @@ export class WorkflowEngine {
     this.log(wf, `[${role}] started on ${tag}`);
     wf.activity.push(`── ${role} · ${tag} ──`);
     this.notify(wf);
+    wf.notifyThrottled = wf.notifyThrottled ?? undefined;
+    let agentPrompt = prompt;
+    if (wf.stageGuidance?.[stepId]) {
+      agentPrompt = `${agentPrompt}\n\nUser developer chat & guidance for this stage:\n${wf.stageGuidance[stepId]}`;
+    }
     const res = await this.executor.run({
-      role, harness, model: this.runOpts.get(wf.id)?.model, effort: this.runOpts.get(wf.id)?.effort, cwd: wf.workDir, prompt,
+      role, harness, model: this.runOpts.get(wf.id)?.model, effort: this.runOpts.get(wf.id)?.effort, cwd: wf.workDir, prompt: agentPrompt,
       signal: this.abortControllers.get(wf.id)?.signal,
       onActivity: (line) => {
         wf.activity!.push(`[${role}] ${line}`);

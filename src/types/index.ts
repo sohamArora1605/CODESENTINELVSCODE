@@ -105,6 +105,8 @@ export interface TicketWorkflow {
   steps: WorkflowStepState[];
   logs: string[];
   plan?: string;
+  stageChats?: Record<string, Array<{ sender: "user" | "agent" | "system"; text: string; timestamp: number }>>;
+  stageGuidance?: Record<string, string>;
   scanResults?: any;
   verificationResults?: any;
   testResults?: any;
