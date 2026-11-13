@@ -577,7 +577,6 @@ export class WorkflowEngine {
     this.log(wf, `[${role}] started on ${tag}`);
     wf.activity.push(`── ${role} · ${tag} ──`);
     this.notify(wf);
-    wf.notifyThrottled = wf.notifyThrottled ?? undefined;
     let agentPrompt = prompt;
     if (wf.stageGuidance?.[stepId]) {
       agentPrompt = `${agentPrompt}\n\nUser developer chat & guidance for this stage:\n${wf.stageGuidance[stepId]}`;

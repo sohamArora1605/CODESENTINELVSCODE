@@ -16,8 +16,8 @@ function freePort(): Promise<number> {
 }
 
 /** A stateless Streamable-HTTP MCP server standing in for Atlassian. `style` selects direct tools vs the executeRead/Write runner. */
-async function mockAtlassian(style: "direct" | "runner", log: any[]): Promise<{ url: string; close: () => void }> {
-  const direct = ["getAccessibleAtlassianResources", "getJiraIssue", "searchJiraIssuesUsingJql", "transitionJiraIssue", "addOrEditJiraIssueComment"];
+async function mockAtlassian(style: "direct" | "runner", log: any[], commentToolName: "addOrEditJiraIssueComment" | "addCommentToJiraIssue" = "addOrEditJiraIssueComment"): Promise<{ url: string; close: () => void }> {
+  const direct = ["getAccessibleAtlassianResources", "getJiraIssue", "searchJiraIssuesUsingJql", "transitionJiraIssue", commentToolName];
   const names = style === "direct" ? direct : ["executeRead", "executeWrite"];
   const handle = (name: string, args: any) => {
     log.push({ name, args });
@@ -26,7 +26,8 @@ async function mockAtlassian(style: "direct" | "runner", log: any[]): Promise<{ 
       case "getJiraIssue": return args.issueIdOrKey === "KAN-4" ? { issues: { nodes: [ISSUE] } } : { __error: "Issue does not exist (404)" };
       case "searchJiraIssuesUsingJql": return { issues: { nodes: [ISSUE, { ...ISSUE, key: "KAN-5" }] } };
       case "transitionJiraIssue": return { status: { name: args.targetStatus } };
-      case "addOrEditJiraIssueComment": return { commentId: "1" };
+      case "addOrEditJiraIssueComment":
+      case "addCommentToJiraIssue": return { commentId: "1" };
     }
     return { __error: "unknown " + name };
   };
@@ -87,6 +88,24 @@ export async function testAtlassianMcp(): Promise<void> {
       assert.strictEqual(log.filter((l) => l.name === "addOrEditJiraIssueComment").pop().args.commentBody, "hello **md**");
     } finally {
       srv.close();
+    }
+  }
+
+  // ---- comment tool detection: prefers addCommentToJiraIssue when available
+  {
+    const logModern: any[] = [];
+    const srvModern = await mockAtlassian("direct", logModern, "addCommentToJiraIssue");
+    setSettingsOverrides({ "jira.mcpUrl": srvModern.url, "jira.host": "https://soham-sandbox.atlassian.net" });
+    (client as any).cloudId = null;
+    try {
+      const cRes = await client.comment("KAN-4", "modern comment test");
+      assert.ok(cRes.ok);
+      const commentCall = logModern.filter((l) => l.name === "addCommentToJiraIssue").pop();
+      assert.ok(commentCall, "addCommentToJiraIssue tool was used instead of fallback");
+      assert.strictEqual(commentCall.args.commentBody, "modern comment test");
+      assert.strictEqual(commentCall.args.issueIdOrKey, "KAN-4");
+    } finally {
+      srvModern.close();
     }
   }
   setSettingsOverrides({});

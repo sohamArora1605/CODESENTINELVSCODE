@@ -328,6 +328,29 @@ export async function testWorkflowEngine(): Promise<void> {
   assert.ok(engine.forceQuit("QUIT-3", repo));
   assert.strictEqual(failedWf.status, "cancelled");
 
+  // ---- Stage chat & guidance test
+  let capturedPrompt = "";
+  engine.setAgentExecutor({
+    async run(req) {
+      capturedPrompt = req.prompt;
+      return { success: true, output: "chat guidance received", code: 0, harness: "claude-code" };
+    },
+  });
+  const chatWf = await engine.start("CHAT-1", repo, {
+    baseBranch: "main",
+    pauseMode: "every_stage",
+    ticket: { ...custom, key: "CHAT-1", summary: "test stage chat" },
+  });
+  const resChat = engine.addStageChat("CHAT-1", repo, "develop", "Please check CORS maxAge validation");
+  assert.strictEqual(resChat.wf.stageChats?.develop?.length, 1);
+  assert.strictEqual(resChat.wf.stageChats.develop[0].text, "Please check CORS maxAge validation");
+  assert.strictEqual(resChat.wf.stageGuidance?.develop, "Please check CORS maxAge validation");
+  assert.ok(chatWf.activity?.some((a) => a.includes("Please check CORS maxAge validation")));
+
+  // Resuming step incorporates guidance into agent prompt
+  await engine.resume("CHAT-1", repo);
+  assert.ok(capturedPrompt.includes("User developer chat & guidance for this stage:\nPlease check CORS maxAge validation"));
+
   setSettingsOverrides({});
   console.log("✔ WorkflowEngine OK");
 }

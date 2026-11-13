@@ -73,5 +73,36 @@ export async function testMcpServer(): Promise<void> {
   const cloudAuditAlias = standaloneServer.getRegisteredTools().find(t => t.name === "cloud_security_audit");
   assert.ok(cloudAuditAlias, "cloud_security_audit alias tool must be registered");
 
+  // Test 8: Verify codesentinel_workflow_force_quit tool registration and execution
+  const forceQuitDef = standaloneServer.getRegisteredTools().find((t) => t.name === "codesentinel_workflow_force_quit");
+  assert.ok(forceQuitDef, "codesentinel_workflow_force_quit tool must be registered");
+  assert.strictEqual(forceQuitDef.inputSchema?.required?.[0], "ticketKey");
+
+  const forceQuitEntry = (standaloneServer as any).tools.get("codesentinel_workflow_force_quit");
+  assert.ok(forceQuitEntry && typeof forceQuitEntry.handler === "function");
+
+  // Non-existent workflow returns error response
+  const failRes = await forceQuitEntry.handler({ ticketKey: "NONEXISTENT-999" });
+  assert.strictEqual(failRes.isError, true);
+  assert.strictEqual(failRes.content[0].text, "No such workflow.");
+
+  // Successful invocation forwards to WorkflowEngine.forceQuit
+  const { WorkflowEngine } = await import("../src/agent/workflowEngine");
+  const engine = WorkflowEngine.getInstance();
+  const origForceQuit = engine.forceQuit.bind(engine);
+  let interceptedArgs: { key: string; repo: string } | null = null;
+  engine.forceQuit = (key: string, repo: string) => {
+    interceptedArgs = { key, repo };
+    return true;
+  };
+  try {
+    const okRes = await forceQuitEntry.handler({ ticketKey: "PROJ-123", repoPath: "/workspace/my-repo" });
+    assert.strictEqual(okRes.isError, false);
+    assert.strictEqual(okRes.content[0].text, "Workflow force quit immediately.");
+    assert.deepStrictEqual(interceptedArgs, { key: "PROJ-123", repo: "/workspace/my-repo" });
+  } finally {
+    engine.forceQuit = origForceQuit;
+  }
+
   console.log("  ✔ MCP Server tool registration, lifecycle, and cloud security audit tool passed!");
 }
