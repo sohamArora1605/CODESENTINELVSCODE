@@ -272,7 +272,28 @@ export async function testWorkflowEngine(): Promise<void> {
   assert.strictEqual(observedAgentDuringRun.effort, "medium");
   assert.ok(agyWf.logs.some((l) => l.includes("gemini-antigravity · gemini-3.8-flash · effort medium")));
 
+  // Antigravity model & effort harmonization drops effort for Claude models
+  let observedClaudeAgy: any;
+  engine.setAgentExecutor({
+    async run(req) {
+      const activeWf = engine.getWorkflow("AGY-2", repo);
+      observedClaudeAgy = activeWf?.currentAgent ? { ...activeWf.currentAgent } : undefined;
+      return { success: true, output: "ok", code: 0, harness: "gemini-antigravity" };
+    },
+  });
+  await engine.start("AGY-2", repo, {
+    baseBranch: "main",
+    harness: "gemini-antigravity",
+    model: "claude-sonnet-4-6",
+    effort: "high",
+    ticket: { ...custom, key: "AGY-2", summary: "test agy claude effort drop" },
+  });
+  assert.strictEqual(observedClaudeAgy.model, "claude-sonnet-4-6");
+  assert.strictEqual(observedClaudeAgy.effort, undefined, "effort dropped for claude model under agy");
+
   // ---- Force quit tests at various stages (running, paused, failed)
+  assert.strictEqual(engine.forceQuit("NONEXISTENT-QUIT", repo), false, "forceQuit returns false for missing workflow");
+
   let agentAborted = false;
   let slowAgentStartedResolve: () => void;
   const slowAgentStarted = new Promise<void>((r) => { slowAgentStartedResolve = r; });
@@ -300,6 +321,7 @@ export async function testWorkflowEngine(): Promise<void> {
   assert.ok(quitOk, "forceQuit returned true");
   assert.strictEqual(runningWf.status, "cancelled", "status immediately cancelled");
   assert.strictEqual(runningWf.awaiting, undefined, "awaiting cleared");
+  assert.strictEqual(runningWf.currentAgent, undefined, "currentAgent cleared");
   assert.ok(agentAborted, "AbortSignal triggered on running agent executor");
   const failedStep = runningWf.steps.find((s) => s.error === "Force quit by user.");
   assert.ok(failedStep, "step marked failed with force quit reason");
@@ -327,6 +349,31 @@ export async function testWorkflowEngine(): Promise<void> {
   assert.strictEqual(failedWf.status, "failed");
   assert.ok(engine.forceQuit("QUIT-3", repo));
   assert.strictEqual(failedWf.status, "cancelled");
+
+  // 4. Cancel also aborts active running agent executor
+  let cancelAgentAborted = false;
+  let cancelAgentStartedResolve: () => void;
+  const cancelAgentStarted = new Promise<void>((r) => { cancelAgentStartedResolve = r; });
+  engine.setAgentExecutor({
+    async run(req) {
+      cancelAgentStartedResolve();
+      if (req.signal) {
+        if (req.signal.aborted) cancelAgentAborted = true;
+        else req.signal.addEventListener("abort", () => { cancelAgentAborted = true; });
+      }
+      await new Promise((r) => setTimeout(r, 2000));
+      return { success: true, output: "done", code: 0, harness: "claude-code" };
+    },
+  });
+  const cancelWf = await engine.start("CANCEL-1", repo, {
+    baseBranch: "main",
+    ticket: { ...custom, key: "CANCEL-1", summary: "test cancel aborts agent" },
+  }, false);
+  await cancelAgentStarted;
+  assert.strictEqual(cancelWf.status, "running");
+  const cancelOk = engine.cancel("CANCEL-1", repo);
+  assert.ok(cancelOk, "cancel returned true");
+  assert.ok(cancelAgentAborted, "AbortSignal triggered on running agent when cancelled");
 
   // ---- Stage chat & guidance test
   let capturedPrompt = "";

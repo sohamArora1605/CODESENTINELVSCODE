@@ -247,6 +247,12 @@ export class TestRunnerService {
     const s = this.getSummary(repoPath);
     s.overallStatus = "running";
     this.notify(s);
+    if (signal?.aborted) {
+      return this.finish(s, "unit", {
+        suite: "unit", repoPath, status: "failed", totalTests: 1, passedCount: 0,
+        failedCount: 1, skippedCount: 0, durationMs: 0, output: "Aborted by signal.", error: "Aborted by signal."
+      });
+    }
     const cmd = this.detectUnitCommand(repoPath, configRepo);
     if (!cmd) return this.skipped(s, "unit", "unit", "No unit test command detected. Set one in the repo's CodeSentinel config (testCommand).");
     return this.execSuite(s, "unit", "unit", cmd, { ...process.env, CI: "true" }, 10 * 60000, "", [], signal);
@@ -260,6 +266,12 @@ export class TestRunnerService {
     const s = this.getSummary(repoPath);
     s.overallStatus = "running";
     this.notify(s);
+    if (signal?.aborted) {
+      return this.finish(s, "stageApi", {
+        suite: "stage_api", repoPath, status: "failed", totalTests: 1, passedCount: 0,
+        failedCount: 1, skippedCount: 0, durationMs: 0, output: "Aborted by signal.", error: "Aborted by signal."
+      });
+    }
     const rc = getRepoConfig(configRepo);
     if (!(rc.apiTestingEnabled ?? getSetting<boolean>("testing.apiTestingEnabled", true))) {
       return this.skipped(s, "stageApi", "stage_api", "API testing is disabled in settings.");
@@ -301,6 +313,12 @@ export class TestRunnerService {
     const s = this.getSummary(repoPath);
     s.overallStatus = "running";
     this.notify(s);
+    if (signal?.aborted) {
+      return this.finish(s, "playwright", {
+        suite: "playwright", repoPath, status: "failed", totalTests: 1, passedCount: 0,
+        failedCount: 1, skippedCount: 0, durationMs: 0, output: "Aborted by signal.", error: "Aborted by signal."
+      });
+    }
     const rc = getRepoConfig(configRepo);
     if (!(rc.playwrightEnabled ?? getSetting<boolean>("testing.playwrightEnabled", true))) {
       return this.skipped(s, "playwright", "playwright", "Playwright testing is disabled in settings.");

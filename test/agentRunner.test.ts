@@ -2,7 +2,8 @@ import * as assert from "assert";
 import * as fs from "fs";
 import * as path from "path";
 import { buildHeadlessCommand, resolveModel, isValidModel, parseClaudeStreamLine, parseAgyStreamLine, parseOpencodeStreamLine, CliAgentExecutor, resolveEffort, isValidEffort, resolveAgyModelAndEffort } from "../src/agent/agentRunner";
-import { buildInteractiveCommand } from "../src/agent/agentTerminalLauncher";
+import { buildInteractiveCommand, AgentTerminalLauncher } from "../src/agent/agentTerminalLauncher";
+import { run, runShell, runStream } from "../src/util/proc";
 import { setSettingsOverrides } from "../src/config/settings";
 import { tmpDir } from "./helpers";
 
@@ -59,9 +60,14 @@ export async function testAgentRunner(): Promise<void> {
   // agy: claude models do not support --effort
   assert.deepStrictEqual(resolveAgyModelAndEffort("claude-sonnet-4-6", "medium"), { model: "claude-sonnet-4-6", effort: undefined });
   assert.deepStrictEqual(resolveAgyModelAndEffort("claude-opus-4-6-thinking", "high"), { model: "claude-opus-4-6-thinking", effort: undefined });
+  assert.deepStrictEqual(resolveAgyModelAndEffort("claude-3-7-sonnet", "low"), { model: "claude-3-7-sonnet", effort: undefined });
   // agy: baked suffix models avoid conflicting --effort
   assert.deepStrictEqual(resolveAgyModelAndEffort("gpt-oss-120b-medium", "medium"), { model: "gpt-oss-120b-medium", effort: undefined });
+  assert.deepStrictEqual(resolveAgyModelAndEffort("gpt-oss-120b-xhigh", "low"), { model: "gpt-oss-120b-xhigh", effort: undefined });
+  assert.deepStrictEqual(resolveAgyModelAndEffort("gemini-3.8-flash-xhigh", "high"), { model: "gemini-3.8-flash", effort: "high" });
+  assert.deepStrictEqual(resolveAgyModelAndEffort("gemini-3.8-flash-max", "low"), { model: "gemini-3.8-flash", effort: "low" });
   assert.deepStrictEqual(resolveAgyModelAndEffort("custom-model-low", "high"), { model: "custom-model-low", effort: undefined });
+  assert.deepStrictEqual(resolveAgyModelAndEffort("custom-model-max", "medium"), { model: "custom-model-max", effort: undefined });
   // agy: standard models without baked suffix pass through valid effort
   assert.deepStrictEqual(resolveAgyModelAndEffort("gemini-2.5-pro", "high"), { model: "gemini-2.5-pro", effort: "high" });
   assert.deepStrictEqual(resolveAgyModelAndEffort("gemini-2.5-pro", "invalid-effort"), { model: "gemini-2.5-pro", effort: undefined });
@@ -187,5 +193,106 @@ echo '{"type":"text","part":{"type":"text","text":"opencode done"}}'
   // a missing CLI is reported, not thrown
   const nope = await new CliAgentExecutor().run({ role: "planner", harness: "claude-code", cwd: bin, prompt: "x", env: { ...process.env, PATH: "/nonexistent" } });
   assert.ok(!nope.success && /not found/.test(nope.output));
+
+  // ---- proc.ts AbortSignal support
+  const preAborted = new AbortController();
+  preAborted.abort();
+  const shPre = await runShell("echo 1", { signal: preAborted.signal });
+  assert.strictEqual(shPre.code, 130, "pre-aborted runShell must exit with code 130");
+
+  const activeSh = new AbortController();
+  const shP = runShell('node -e "setTimeout(()=>{},5000)"', { signal: activeSh.signal });
+  setTimeout(() => activeSh.abort(), 80);
+  const shActive = await shP;
+  assert.strictEqual(shActive.code, 130, "running runShell aborted must exit with code 130");
+
+  const streamPre = await runStream(process.execPath, ["-e", "console.log(1)"], { signal: preAborted.signal });
+  assert.strictEqual(streamPre.code, 130, "pre-aborted runStream must exit with code 130");
+
+  const activeStream = new AbortController();
+  const streamP = runStream(process.execPath, ["-e", "setTimeout(()=>{},5000)"], { signal: activeStream.signal });
+  setTimeout(() => activeStream.abort(), 80);
+  const streamActive = await streamP;
+  assert.strictEqual(streamActive.code, 130, "running runStream aborted must exit with code 130");
+  assert.ok(streamActive.stderr.includes("Process aborted by signal."));
+
+  const runPre = await run(process.execPath, ["-e", "console.log(1)"], { signal: preAborted.signal });
+  assert.strictEqual(runPre.code, 130, "pre-aborted run must exit with code 130");
+
+  // ---- CliAgentExecutor with AbortSignal
+  const slowBin = tmpDir("cs-slowbin-");
+  fs.writeFileSync(path.join(slowBin, "claude"), `#!/usr/bin/env node
+setTimeout(() => {}, 10000);
+`, { mode: 0o755 });
+
+  const agentPreAbort = new AbortController();
+  agentPreAbort.abort();
+  const agentPreRes = await new CliAgentExecutor().run({
+    role: "developer", harness: "claude-code", cwd: slowBin, prompt: "test", signal: agentPreAbort.signal,
+    env: { ...process.env, PATH: `${slowBin}${path.delimiter}${process.env.PATH}` },
+  });
+  assert.strictEqual(agentPreRes.success, false);
+  assert.strictEqual(agentPreRes.code, 130);
+
+  const agentLiveAbort = new AbortController();
+  const slowAgentP = new CliAgentExecutor().run({
+    role: "developer", harness: "claude-code", cwd: slowBin, prompt: "test", signal: agentLiveAbort.signal,
+    env: { ...process.env, PATH: `${slowBin}${path.delimiter}${process.env.PATH}` },
+  });
+  setTimeout(() => agentLiveAbort.abort(), 80);
+  const agentLiveRes = await slowAgentP;
+  assert.strictEqual(agentLiveRes.success, false);
+  assert.strictEqual(agentLiveRes.code, 130);
+
+  // ---- AgentTerminalLauncher: reuse existing terminal without resending startup command
+  const launcher = AgentTerminalLauncher.getInstance();
+  const mockWorkspace = tmpDir("cs-term-");
+  const vscodeMock = require("vscode");
+  let shownCount = 0;
+  const sentTexts: string[] = [];
+
+  const fakeTerminalInstance = {
+    name: "",
+    show: () => { shownCount++; },
+    sendText: (t: string) => { sentTexts.push(t); },
+  };
+
+  const origTerminals = vscodeMock.window.terminals;
+  const origCreateTerminal = vscodeMock.window.createTerminal;
+  vscodeMock.window.terminals = [];
+  vscodeMock.window.createTerminal = (opts: any) => {
+    const t = { ...fakeTerminalInstance, name: opts.name };
+    vscodeMock.window.terminals.push(t);
+    return t;
+  };
+
+  try {
+    const tFirst = launcher.launchAgentTerminal(
+      mockWorkspace,
+      "gemini-antigravity",
+      "fix bug",
+      { key: "BUG-101", summary: "Fix NPE", branch: "fix/npe" },
+      {},
+      { model: "gemini-3.8-flash-high", effort: "medium" }
+    );
+    assert.strictEqual(vscodeMock.window.terminals.length, 1);
+    assert.strictEqual(sentTexts.length, 1);
+    assert.ok(sentTexts[0].includes("agy --model gemini-3.8-flash --effort medium"));
+
+    // Launching the same ticket/repo again brings terminal to front and does NOT call sendText again
+    const tSecond = launcher.launchAgentTerminal(
+      mockWorkspace,
+      "gemini-antigravity",
+      "fix bug",
+      { key: "BUG-101", summary: "Fix NPE", branch: "fix/npe" }
+    );
+    assert.strictEqual(tSecond, tFirst);
+    assert.strictEqual(shownCount, 2, "terminal shown on creation and brought to front on second launch");
+    assert.strictEqual(sentTexts.length, 1, "sendText was not called again for existing terminal");
+  } finally {
+    vscodeMock.window.terminals = origTerminals;
+    vscodeMock.window.createTerminal = origCreateTerminal;
+  }
+
   console.log("✔ AgentRunner OK");
 }
